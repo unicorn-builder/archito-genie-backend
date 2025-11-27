@@ -588,19 +588,59 @@ async def generate_report(project_id: str):
     """Generate the full AI report using OpenAI API."""
     if project_id not in ENGINEERING_RESULTS:
         raise HTTPException(status_code=404, detail="Engineering result not found. Run analysis first.")
-    
+
     # Get OpenAI API key
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
-    
+
+    # 🔑 Créer le client OpenAI (c’est ce qui manquait)
+    client = OpenAI(api_key=openai_api_key)
+
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
-    
+
     # Convert to JSON for the prompt
     result_json = json.dumps(engineering_result.dict(), indent=2)
-    
-    # Call OpenAI API
+    project_json = json.dumps(project.dict(), indent=2)
+
+    # Construire le prompt pour ton rapport en 7 sections
+    prompt = f"""
+You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
+
+Use the data below to produce a detailed report in EXACTLY 7 sections:
+
+1. DESIGN NARRATIVE & PRINCIPLES  
+2. CALCULATIONS (CONCEPTUAL / PRELIMINARY)  
+3. DESIGN SCHEMATICS  
+4. STRUCTURAL DRAWINGS (CONCEPTUAL)  
+5. MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)  
+6. DATASHEETS  
+7. BILL OF QUANTITIES – 3 OPTIONS (Basic, High-End, Luxury)
+
+Always include:
+- A disclaimer at the top saying this is conceptual/preliminary and must be validated by licensed engineers.
+- Clear assumptions.
+- Structured markdown headings and bullet points.
+
+=== PROJECT DATA ===
+{project_json}
+
+=== ENGINEERING RESULT ===
+{result_json}
+"""
+
+    try:
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+        )
+        report_markdown = response.output[0].content[0].text
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
+
+    return ReportResponse(project_id=project_id, report_markdown=report_markdown)
+
     from openai import OpenAI
 
     def generate_report(project: Project) -> dict:
