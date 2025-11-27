@@ -594,8 +594,8 @@ async def generate_report(project_id: str):
     if not openai_api_key:
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
 
-    # 🔑 Créer le client OpenAI (c’est ce qui manquait)
-        client = OpenAIClient(api_key=openai_api_key)
+    # Créer le client OpenAI
+    client = OpenAIClient(api_key=openai_api_key)
 
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
@@ -604,8 +604,20 @@ async def generate_report(project_id: str):
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # Construire le prompt pour ton rapport en 7 sections
-    prompt = f"""
+    prompt = f"""... (le texte du prompt) ..."""
+
+    try:
+        response = client.responses.create(
+            model="gpt-4.1-mini",
+            input=prompt,
+        )
+        report_markdown = response.output[0].content[0].text
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
+
+    return ReportResponse(project_id=project_id, report_markdown=report_markdown)
+
+    
 You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
 
 Use the data below to produce a detailed report in EXACTLY 7 sections:
