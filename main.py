@@ -601,7 +601,17 @@ async def generate_report(project_id: str):
     result_json = json.dumps(engineering_result.dict(), indent=2)
     
     # Call OpenAI API
-    client = OpenAI(api_key=openai_api_key)
+    from openai import OpenAI
+
+    def generate_report(project: Project) -> dict:
+        openai_api_key = os.getenv("OPENAI_API_KEY")
+
+        # Remove proxies (Render injects them)
+        os.environ.pop("http_proxy", None)
+        os.environ.pop("https_proxy", None)
+
+        client = OpenAI(api_key=openai_api_key)
+
     
     try:
         response = client.chat.completions.create(
