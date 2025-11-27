@@ -199,6 +199,14 @@ def calculate_structural_design(project: Project) -> dict:
     area = project.gross_floor_area_m2
     levels = project.levels
     building_type = project.building_type.lower()
+
+    # 🚧 Protection : empêcher division par zéro
+    if levels is None or levels <= 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid project data: 'levels' must be greater than 0 to run analysis.",
+        )
+
     
     # Determine structural system based on building type and size
     if levels <= 3:
