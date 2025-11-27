@@ -595,7 +595,7 @@ async def generate_report(project_id: str):
         raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
 
     # 🔑 Créer le client OpenAI (c’est ce qui manquait)
-client = OpenAIClient(api_key=openai_api_key)
+        client = OpenAIClient(api_key=openai_api_key)
 
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
