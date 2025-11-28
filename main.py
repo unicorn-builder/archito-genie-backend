@@ -574,48 +574,91 @@ async def analyze_project(project_id: str):
     return result
 
 
-@app.get("/projects/{project_id}/engineering-result", response_model=EngineeringResult)
-async def get_engineering_result(project_id: str):
-    """Get the engineering analysis result."""
-    if project_id not in ENGINEERING_RESULTS:
-        raise HTTPException(status_code=404, detail="Engineering result not found. Run analysis first.")
-    
-    return ENGINEERING_RESULTS[project_id]
-
-
 @app.get("/projects/{project_id}/report", response_model=ReportResponse)
 async def generate_report(project_id: str):
     """Generate the full AI report using OpenAI API."""
-    if project_id not in ENGINEERING_RESULTS:
-        raise HTTPException(status_code=404, detail="Engineering result not found. Run analysis first.")
 
-    # Get OpenAI API key
+    # Vérifier que l'analyse a bien été faite
+    if project_id not in ENGINEERING_RESULTS:
+        raise HTTPException(
+            status_code=404,
+            detail="Engineering result not found. Run analysis first."
+        )
+
+    # Récupérer la clé OpenAI
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY not configured on server"
+        )
 
-    # Créer le client OpenAI
-    client = OpenAIClient(api_key=openai_api_key)
+    # Créer le client OpenAI (nouveau SDK)
+    client = OpenAI(api_key=openai_api_key)
 
+    # Récupérer les données d'ingénierie et du projet
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
 
-    # Convert to JSON for the prompt
+    # Convertir en JSON pour les donner au modèle
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    prompt = f"""... (le texte du prompt) ..."""
+    # Construire le prompt complet ENTIÈREMENT ici (un seul bloc """ ... """)
+    prompt = f"""
+You are Archito-Genie, an assistant generating conceptual engineering, MEPF and sustainability design reports.
+
+PROJECT DATA (JSON):
+{project_json}
+
+ENGINEERING ANALYSIS RESULT (JSON):
+{result_json}
+
+Using only information that can be reasonably inferred from the data above, generate a DETAILED REPORT in EXACTLY 7 SECTIONS, in clear Markdown:
+
+1. DESIGN NARRATIVE & PRINCIPLES
+2. CALCULATIONS (CONCEPTUAL / PRELIMINARY)
+3. DESIGN SCHEMATICS
+4. STRUCTURAL DRAWINGS (CONCEPTUAL)
+5. MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
+6. DATASHEETS
+7. BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
+
+For each section:
+- Use proper Markdown headings (##, ###).
+- Use bullet points and tables where relevant.
+- Be explicit about assumptions and typical values when real data is missing.
+- Keep the style professional but concise.
+
+At the very end, add a short section called "DISCLAIMER" explaining that:
+- This report is a preliminary, AI-generated conceptual study.
+- It MUST be reviewed, completed and validated by licensed architects and engineers.
+- It cannot be used as-is for construction, permitting, or execution.
+"""
 
     try:
+        # Appel à l'API OpenAI (Responses API)
         response = client.responses.create(
             model="gpt-4.1-mini",
             input=prompt,
         )
-        report_markdown = response.output[0].content[0].text
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
 
-    return ReportResponse(project_id=project_id, report_markdown=report_markdown)
+        # Récupérer le texte du rapport
+        report_markdown = response.output[0].content[0].text
+
+    except Exception as e:
+        # En cas d'erreur OpenAI, renvoyer un 500 lisible
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI API error: {e}"
+        )
+
+    # Retourner la réponse au frontend
+    return ReportResponse(
+        project_id=project_id,
+        report_markdown=report_markdown,
+    )
+
 
     
 You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
