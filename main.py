@@ -120,7 +120,25 @@ class EngineeringResult(BaseModel):
 
 class ReportResponse(BaseModel):
     project_id: str
+
+    # Rapport complet (pour compatibilité + vue globale)
     report_markdown: str
+
+    # Sections séparées (optionnelles pour l’instant)
+    narrative_markdown: Optional[str] = None
+    calc_notes_markdown: Optional[str] = None
+    schematics_markdown: Optional[str] = None
+
+    boq_basic_markdown: Optional[str] = None
+    boq_high_end_markdown: Optional[str] = None
+    boq_luxury_markdown: Optional[str] = None
+
+    datasheets_markdown: Optional[str] = None
+
+    # Plus tard : spécifications pour plans REVIT/DWG
+    structural_spec_markdown: Optional[str] = None
+    mepf_spec_markdown: Optional[str] = None
+
 
 
 # ==============================================================================
@@ -577,78 +595,102 @@ async def analyze_project(project_id: str):
 
 @app.get("/projects/{project_id}/report", response_model=ReportResponse)
 async def generate_report(project_id: str):
-    """Generate the full AI report using OpenAI API (via HTTP request)."""
+    """Generate the full AI report using OpenAI API, with structured sections."""
 
-    # Vérifier que l'analyse a bien été faite
+    # Vérifier que l’analyse existe
     if project_id not in ENGINEERING_RESULTS:
-        raise HTTPException(
-            status_code=404,
-            detail="Engineering result not found. Run analysis first."
-        )
+        raise HTTPException(status_code=404, detail="Engineering result not found. Run analysis first.")
 
-    # Récupérer la clé OpenAI
+    # 1) Récupérer la clé OpenAI
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="OPENAI_API_KEY not configured on server"
-        )
+        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
 
-    # Récupérer les données d'ingénierie et du projet
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
 
-    # Convertir en JSON pour les donner au modèle
+    # 2) Préparer les données en JSON (à fournir au modèle)
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # Construire le prompt complet
+    # 3) Construire le prompt : on demande un **JSON strict**
     prompt = f"""
-    You are Archito-Genie, an assistant generating conceptual engineering, MEPF and sustainability design reports.
-    
-    PROJECT DATA (JSON):
-    {project_json}
-    
-    ENGINEERING ANALYSIS RESULT (JSON):
-    {result_json}
-    
-    Using only information that can be reasonably inferred from the data above, generate a DETAILED REPORT in EXACTLY 7 SECTIONS, in clear Markdown:
-    
-    DESIGN NARRATIVE & PRINCIPLES
-    
-    CALCULATIONS (CONCEPTUAL / PRELIMINARY)
-    
-    DESIGN SCHEMATICS
-    
-    STRUCTURAL DRAWINGS (CONCEPTUAL)
-    
-    MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
-    
-    DATASHEETS
-    
-    BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
-    
-    For each section:
-    
-    Use proper Markdown headings (##, ###).
-    
-    Use bullet points and tables where relevant.
-    
-    Be explicit about assumptions and typical values when real data is missing.
-    
-    Keep the style professional but concise.
-    
-    At the very end, add a short section called "DISCLAIMER" explaining that:
-    
-    This report is a preliminary, AI-generated conceptual study.
-    
-    It MUST be reviewed, completed and validated by licensed architects and engineers.
-    
-    It cannot be used as-is for construction, permitting, or execution.
-    """
+You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports
+for residential and mixed-use buildings in Africa and hot-humid climates (like Dakar, Senegal).
 
+You receive:
 
-    # Appel direct à l'API OpenAI /v1/responses
+1) project metadata:
+{project_json}
+
+2) conceptual engineering & sustainability analysis:
+{result_json}
+
+You must return ONLY a single valid JSON object (no markdown, no comments, no extra text),
+with the following structure:
+
+{{
+  "narrative_markdown": "...",
+  "calc_notes_markdown": "...",
+  "schematics_markdown": "...",
+  "datasheets_markdown": "...",
+  "boq_basic_markdown": "...",
+  "boq_high_end_markdown": "...",
+  "boq_luxury_markdown": "...",
+  "structural_spec_markdown": "...",
+  "mepf_spec_markdown": "...",
+  "disclaimer_markdown": "..."
+}}
+
+Guidelines for each field:
+
+- "narrative_markdown":
+  A full technical design narrative similar in structure & quality to a professional technical proposal
+  (like a BESS / HVAC / building design report).
+  Use clear sections with markdown headings (##, ###), tables and bullet points where relevant.
+  Cover: project overview, climate & code context, architectural summary, structural concept,
+  HVAC concept, plumbing & drainage concept, electrical/solar concept, automation/integration concept,
+  sustainability strategy.
+
+- "calc_notes_markdown":
+  Conceptual-level calculation notes (loads, capacities, airflow, pipe sizing logic, PV sizing logic, etc.).
+  Use subsections per discipline, formulas, explanation of assumptions and safety factors.
+
+- "schematics_markdown":
+  A textual description of the main schematics (HVAC, plumbing, electrical, solar, BMS),
+  listing key equipment, flows and main one-line / single-line diagrams described in words and tables.
+  This will later drive REVIT/DWG automation.
+
+- "datasheets_markdown":
+  A list of recommended key equipment (by category, not by brand unless necessary),
+  with required performance parameters, standards and typical ranges, similar to professional datasheet extracts.
+
+- "boq_basic_markdown", "boq_high_end_markdown", "boq_luxury_markdown":
+  Three alternative conceptual Bill of Quantities outlines (Basic / High-end / Luxury).
+  For each, provide a markdown table with: Item group, Short description, Unit, Qty (conceptual),
+  Quality level notes, Risk / assumptions notes.
+
+- "structural_spec_markdown":
+  Design brief for structural engineers: structural system, key spans, loads, exposure, durability,
+  foundations concept, coordination notes. This is a text spec that will later feed a BIM template.
+
+- "mepf_spec_markdown":
+  Design brief for MEPF engineers: HVAC system types, zoning, ventilation strategy,
+  plumbing & drainage strategy, water supply, electrical LV + solar + backup, automation & controls,
+  integration with local utilities. Also written as a spec to feed BIM templates.
+
+- "disclaimer_markdown":
+  A short but strong disclaimer reminding that this is a preliminary AI-generated conceptual study
+  that MUST be reviewed, completed and validated by licensed architects and engineers,
+  and must not be used as-is for construction, permitting or execution.
+
+VERY IMPORTANT:
+- Return valid JSON only.
+- All values must be UTF-8 strings (no null).
+- Use concise but professional English.
+"""
+
+    # 4) Appel à l’API OpenAI /v1/responses
     url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
@@ -660,16 +702,73 @@ async def generate_report(project_id: str):
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=90)
-        resp.raise_for_status()
-        data = resp.json()
-
-        # On récupère le texte du rapport dans la réponse OpenAI
-        report_markdown = data["output"][0]["content"][0]["text"]
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
+        raise HTTPException(status_code=502, detail=f"Error calling OpenAI API: {e}")
 
-    return ReportResponse(project_id=project_id, report_markdown=report_markdown)
+    if resp.status_code != 200:
+        raise HTTPException(status_code=502, detail=f"OpenAI API error {resp.status_code}: {resp.text}")
+
+    try:
+        data = resp.json()
+        ai_text = data["output"][0]["content"][0]["text"].strip()
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Unexpected OpenAI response format: {e}")
+
+    # 5) Parser le JSON renvoyé par le modèle
+    try:
+        sections = json.loads(ai_text)
+    except Exception as e:
+        # fallback : si jamais le modèle ne renvoie pas du JSON propre,
+        # on met tout dans report_markdown
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=ai_text,
+        )
+
+    # Sécuriser chaque champ (éviter KeyError)
+    narrative = sections.get("narrative_markdown", "")
+    calc_notes = sections.get("calc_notes_markdown", "")
+    schematics = sections.get("schematics_markdown", "")
+    datasheets = sections.get("datasheets_markdown", "")
+    boq_basic = sections.get("boq_basic_markdown", "")
+    boq_high = sections.get("boq_high_end_markdown", "")
+    boq_lux = sections.get("boq_luxury_markdown", "")
+    structural_spec = sections.get("structural_spec_markdown", "")
+    mepf_spec = sections.get("mepf_spec_markdown", "")
+    disclaimer = sections.get("disclaimer_markdown", "")
+
+    # 6) Rapport global (pour compatibilité) = concat des sections
+    full_report = "\n\n".join(
+        part for part in [
+            narrative,
+            "## Calculation Notes\n\n" + calc_notes if calc_notes else "",
+            "## Schematics Description\n\n" + schematics if schematics else "",
+            "## Datasheets (Conceptual)\n\n" + datasheets if datasheets else "",
+            "## Bill of Quantities – Basic\n\n" + boq_basic if boq_basic else "",
+            "## Bill of Quantities – High-End\n\n" + boq_high if boq_high else "",
+            "## Bill of Quantities – Luxury\n\n" + boq_lux if boq_lux else "",
+            "## Structural Design Brief\n\n" + structural_spec if structural_spec else "",
+            "## MEPF Design Brief\n\n" + mepf_spec if mepf_spec else "",
+            "## DISCLAIMER\n\n" + disclaimer if disclaimer else "",
+        ]
+        if part
+    )
+
+    return ReportResponse(
+        project_id=project_id,
+        report_markdown=full_report,
+        narrative_markdown=narrative,
+        calc_notes_markdown=calc_notes,
+        schematics_markdown=schematics,
+        datasheets_markdown=datasheets,
+        boq_basic_markdown=boq_basic,
+        boq_high_end_markdown=boq_high,
+        boq_luxury_markdown=boq_lux,
+        structural_spec_markdown=structural_spec,
+        mepf_spec_markdown=mepf_spec,
+    )
+
 
 
 
