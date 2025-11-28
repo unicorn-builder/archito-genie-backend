@@ -722,30 +722,30 @@ async def generate_report(project_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected OpenAI response format: {e}")
 
-    # 5) Parser le JSON renvoyé par le modèle
+        # 5) Parser le JSON renvoyé par le modèle
     try:
         sections = json.loads(ai_text)
 
-    required_fields = [
-    "narrative_markdown",
-    "calc_notes_markdown",
-    "schematics_markdown",
-    "datasheets_markdown",
-    "boq_basic_markdown",
-    "boq_high_end_markdown",
-    "boq_luxury_markdown",
-    "structural_spec_markdown",
-    "mepf_spec_markdown",
-    "disclaimer_markdown",
-    ]
-    
-    missing = [f for f in required_fields if f not in sections]
-    
-    if missing:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI response missing required fields: {missing}"
-        )
+        required_fields = [
+            "narrative_markdown",
+            "calc_notes_markdown",
+            "schematics_markdown",
+            "datasheets_markdown",
+            "boq_basic_markdown",
+            "boq_mid_markdown",
+            "boq_luxury_markdown",
+            "structural_spec_markdown",
+            "mepf_spec_markdown",
+            "disclaimer_markdown",
+        ]
+
+        missing = [f for f in required_fields if f not in sections]
+
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail=f"OpenAI response missing required fields: {missing}",
+            )
 
     except Exception as e:
         # fallback : si jamais le modèle ne renvoie pas du JSON propre,
@@ -754,6 +754,7 @@ async def generate_report(project_id: str):
             project_id=project_id,
             report_markdown=ai_text,
         )
+
 
     # Sécuriser chaque champ (éviter KeyError)
     narrative = sections.get("narrative_markdown", "")
