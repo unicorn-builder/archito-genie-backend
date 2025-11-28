@@ -23,7 +23,8 @@ from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from openai import OpenAI as OpenAIClient
+import requests
+# from openai import OpenAI  # plus besoin de la librairie OpenAI
 
 # ==============================================================================
 # CONFIGURATION
@@ -576,7 +577,7 @@ async def analyze_project(project_id: str):
 
 @app.get("/projects/{project_id}/report", response_model=ReportResponse)
 async def generate_report(project_id: str):
-    """Generate the full AI report using OpenAI API."""
+    """Generate the full AI report using OpenAI API (via HTTP request)."""
 
     # Vérifier que l'analyse a bien été faite
     if project_id not in ENGINEERING_RESULTS:
@@ -593,9 +594,6 @@ async def generate_report(project_id: str):
             detail="OPENAI_API_KEY not configured on server"
         )
 
-    # Créer le client OpenAI (nouveau SDK)
-    client = OpenAI(api_key=openai_api_key)
-
     # Récupérer les données d'ingénierie et du projet
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
@@ -604,7 +602,7 @@ async def generate_report(project_id: str):
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # Construire le prompt complet ENTIÈREMENT ici (un seul bloc """ ... """)
+    # Construire le prompt complet
     prompt = f"""
 You are Archito-Genie, an assistant generating conceptual engineering, MEPF and sustainability design reports.
 
@@ -616,46 +614,82 @@ ENGINEERING ANALYSIS RESULT (JSON):
 
 Using only information that can be reasonably inferred from the data above, generate a DETAILED REPORT in EXACTLY 7 SECTIONS, in clear Markdown:
 
-1. DESIGN NARRATIVE & PRINCIPLES
-2. CALCULATIONS (CONCEPTUAL / PRELIMINARY)
-3. DESIGN SCHEMATICS
-4. STRUCTURAL DRAWINGS (CONCEPTUAL)
-5. MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
-6. DATASHEETS
-7. BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
+DESIGN NARRATIVE & PRINCIPLES
+
+CALCULATIONS (CONCEPTUAL / PRELIMINARY)
+
+DESIGN SCHEMATICS
+
+STRUCTURAL DRAWINGS (CONCEPTUAL)
+
+MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
+
+DATASHEETS
+
+BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
 
 For each section:
-- Use proper Markdown headings (##, ###).
-- Use bullet points and tables where relevant.
-- Be explicit about assumptions and typical values when real data is missing.
-- Keep the style professional but concise.
+
+Use proper Markdown headings (##, ###).
+
+Use bullet points and tables where relevant.
+
+Be explicit about assumptions and typical values when real data is missing.
+
+Keep the style professional but concise.
 
 At the very end, add a short section called "DISCLAIMER" explaining that:
-- This report is a preliminary, AI-generated conceptual study.
-- It MUST be reviewed, completed and validated by licensed architects and engineers.
-- It cannot be used as-is for construction, permitting, or execution.
+
+This report is a preliminary, AI-generated conceptual study.
+
+It MUST be reviewed, completed and validated by licensed architects and engineers.
+
+It cannot be used as-is for construction, permitting, or execution.
 """
 
-    try:
-        # Appel à l'API OpenAI (Responses API)
-        response = client.responses.create(
-            model="gpt-4.1-mini",
-            input=prompt,
-        )
+python
+Copier le code
+ # Appel direct à l'API OpenAI /v1/responses
+ url = "https://api.openai.com/v1/responses"
+ headers = {
+     "Authorization": f"Bearer {openai_api_key}",
+     "Content-Type": "application/json",
+ }
+ payload = {
+     "model": "gpt-4.1-mini",
+     "input": prompt,
+ }
 
-        # Récupérer le texte du rapport
-        report_markdown = response.output[0].content[0].text
+ try:
+     resp = requests.post(url, headers=headers, json=payload, timeout=90)
+ except Exception as e:
+     raise HTTPException(
+         status_code=500,
+         detail=f"OpenAI API network error: {e}"
+     )
 
-    except Exception as e:
-        # En cas d'erreur OpenAI, renvoyer un 500 lisible
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI API error: {e}"
-        )
+ if resp.status_code != 200:
+     # On renvoie l'erreur brute pour comprendre s'il y a un souci de clé, quota, etc.
+     raise HTTPException(
+         status_code=500,
+         detail=f"OpenAI API error: {resp.status_code} - {resp.text}"
+     )
 
-    # Retourner la réponse au frontend
-    return ReportResponse(
-        project_id=project_id,
-        report_markdown=report_markdown,
-    )
+ data = resp.json()
+
+ try:
+     report_markdown = data["output"][0]["content"][0]["text"]
+ except Exception:
+     raise HTTPException(
+         status_code=500,
+         detail=f"Unexpected OpenAI response format: {data}"
+     )
+
+ return ReportResponse(
+     project_id=project_id,
+     report_markdown=report_markdown,
+ )
+
+
+
 
