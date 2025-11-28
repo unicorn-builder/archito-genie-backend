@@ -647,8 +647,7 @@ It MUST be reviewed, completed and validated by licensed architects and engineer
 It cannot be used as-is for construction, permitting, or execution.
 """
 
-python
-Copier le code
+
  # Appel direct à l'API OpenAI /v1/responses
  url = "https://api.openai.com/v1/responses"
  headers = {
