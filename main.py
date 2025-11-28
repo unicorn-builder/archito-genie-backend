@@ -722,51 +722,41 @@ async def generate_report(project_id: str):
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Unexpected OpenAI response format: {e}")
 
-        # 5) Parser le JSON renvoyé par le modèle
-    try:
-        sections = json.loads(ai_text)
+    # 5) Construire le prompt JSON
+        prompt = f"""
+    You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
+    
+    You receive two JSON blobs:
+    - PROJECT_JSON: description of the building and user constraints.
+    - ENGINEERING_RESULT_JSON: preliminary engineering calculations and sizing.
+    
+    PROJECT_JSON:
+    {project_json}
+    
+    ENGINEERING_RESULT_JSON:
+    {result_json}
+    
+    Using ONLY these data, build ONE JSON object with the following string fields:
+    
+    - "narrative_markdown"
+    - "calc_notes_markdown"
+    - "schematics_markdown"
+    - "datasheets_markdown"
+    - "boq_basic_markdown"
+    - "boq_high_end_markdown"
+    - "boq_luxury_markdown"
+    - "structural_spec_markdown"
+    - "mepf_spec_markdown"
+    - "disclaimer_markdown"
+    
+    Each field must contain a complete, professional markdown section.
+    
+    Rules:
+    - Return ONLY the JSON object (no explanation, no ``` fences, no extra text).
+    - All fields are required and must be non-empty strings.
+    - Use clear headings, bullet points and tables where helpful INSIDE the markdown.
+    """
 
-        required_fields = [
-            "narrative_markdown",
-            "calc_notes_markdown",
-            "schematics_markdown",
-            "datasheets_markdown",
-            "boq_basic_markdown",
-            "boq_mid_markdown",
-            "boq_luxury_markdown",
-            "structural_spec_markdown",
-            "mepf_spec_markdown",
-            "disclaimer_markdown",
-        ]
-
-        missing = [f for f in required_fields if f not in sections]
-
-        if missing:
-            raise HTTPException(
-                status_code=500,
-                detail=f"OpenAI response missing required fields: {missing}",
-            )
-
-    except Exception as e:
-        # fallback : si jamais le modèle ne renvoie pas du JSON propre,
-        # on met tout dans report_markdown
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=ai_text,
-        )
-
-
-    # Sécuriser chaque champ (éviter KeyError)
-    narrative = sections.get("narrative_markdown", "")
-    calc_notes = sections.get("calc_notes_markdown", "")
-    schematics = sections.get("schematics_markdown", "")
-    datasheets = sections.get("datasheets_markdown", "")
-    boq_basic = sections.get("boq_basic_markdown", "")
-    boq_high = sections.get("boq_high_end_markdown", "")
-    boq_lux = sections.get("boq_luxury_markdown", "")
-    structural_spec = sections.get("structural_spec_markdown", "")
-    mepf_spec = sections.get("mepf_spec_markdown", "")
-    disclaimer = sections.get("disclaimer_markdown", "")
 
     # 6) Rapport global (pour compatibilité) = concat des sections
     full_report = "\n\n".join(
