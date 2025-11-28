@@ -604,90 +604,73 @@ async def generate_report(project_id: str):
 
     # Construire le prompt complet
     prompt = f"""
-You are Archito-Genie, an assistant generating conceptual engineering, MEPF and sustainability design reports.
+    You are Archito-Genie, an assistant generating conceptual engineering, MEPF and sustainability design reports.
+    
+    PROJECT DATA (JSON):
+    {project_json}
+    
+    ENGINEERING ANALYSIS RESULT (JSON):
+    {result_json}
+    
+    Using only information that can be reasonably inferred from the data above, generate a DETAILED REPORT in EXACTLY 7 SECTIONS, in clear Markdown:
+    
+    DESIGN NARRATIVE & PRINCIPLES
+    
+    CALCULATIONS (CONCEPTUAL / PRELIMINARY)
+    
+    DESIGN SCHEMATICS
+    
+    STRUCTURAL DRAWINGS (CONCEPTUAL)
+    
+    MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
+    
+    DATASHEETS
+    
+    BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
+    
+    For each section:
+    
+    Use proper Markdown headings (##, ###).
+    
+    Use bullet points and tables where relevant.
+    
+    Be explicit about assumptions and typical values when real data is missing.
+    
+    Keep the style professional but concise.
+    
+    At the very end, add a short section called "DISCLAIMER" explaining that:
+    
+    This report is a preliminary, AI-generated conceptual study.
+    
+    It MUST be reviewed, completed and validated by licensed architects and engineers.
+    
+    It cannot be used as-is for construction, permitting, or execution.
+    """
 
-PROJECT DATA (JSON):
-{project_json}
 
-ENGINEERING ANALYSIS RESULT (JSON):
-{result_json}
+    # Appel direct à l'API OpenAI /v1/responses
+    url = "https://api.openai.com/v1/responses"
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": prompt,
+    }
 
-Using only information that can be reasonably inferred from the data above, generate a DETAILED REPORT in EXACTLY 7 SECTIONS, in clear Markdown:
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
 
-DESIGN NARRATIVE & PRINCIPLES
+        # On récupère le texte du rapport dans la réponse OpenAI
+        report_markdown = data["output"][0]["content"][0]["text"]
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI API error: {e}")
 
-CALCULATIONS (CONCEPTUAL / PRELIMINARY)
+    return ReportResponse(project_id=project_id, report_markdown=report_markdown)
 
-DESIGN SCHEMATICS
-
-STRUCTURAL DRAWINGS (CONCEPTUAL)
-
-MEPF / INTEGRATION / AUTOMATION DRAWINGS (CONCEPTUAL)
-
-DATASHEETS
-
-BILL OF QUANTITIES - 3 OPTIONS (Basic, High-End, Luxury)
-
-For each section:
-
-Use proper Markdown headings (##, ###).
-
-Use bullet points and tables where relevant.
-
-Be explicit about assumptions and typical values when real data is missing.
-
-Keep the style professional but concise.
-
-At the very end, add a short section called "DISCLAIMER" explaining that:
-
-This report is a preliminary, AI-generated conceptual study.
-
-It MUST be reviewed, completed and validated by licensed architects and engineers.
-
-It cannot be used as-is for construction, permitting, or execution.
-"""
-
-
- # Appel direct à l'API OpenAI /v1/responses
- url = "https://api.openai.com/v1/responses"
- headers = {
-     "Authorization": f"Bearer {openai_api_key}",
-     "Content-Type": "application/json",
- }
- payload = {
-     "model": "gpt-4.1-mini",
-     "input": prompt,
- }
-
- try:
-     resp = requests.post(url, headers=headers, json=payload, timeout=90)
- except Exception as e:
-     raise HTTPException(
-         status_code=500,
-         detail=f"OpenAI API network error: {e}"
-     )
-
- if resp.status_code != 200:
-     # On renvoie l'erreur brute pour comprendre s'il y a un souci de clé, quota, etc.
-     raise HTTPException(
-         status_code=500,
-         detail=f"OpenAI API error: {resp.status_code} - {resp.text}"
-     )
-
- data = resp.json()
-
- try:
-     report_markdown = data["output"][0]["content"][0]["text"]
- except Exception:
-     raise HTTPException(
-         status_code=500,
-         detail=f"Unexpected OpenAI response format: {data}"
-     )
-
- return ReportResponse(
-     project_id=project_id,
-     report_markdown=report_markdown,
- )
 
 
 
