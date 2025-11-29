@@ -810,18 +810,23 @@ Rules:
         resp.raise_for_status()
         data = resp.json()
 
-        # ===== NOUVELLE EXTRACTION RÉPONSES 2024/2025 =====
-        ai_text = data.get("output_text", "")
+        # === Extraction simplifiée et robuste ===
+        # Le Responses API renvoie déjà le texte complet dans `output_text`
+        ai_text = data.get("output_text")
         if not ai_text:
-            ai_text = data["output"][0]["content"][0]["text"]["value"]
+            # Fallback ultra-sécurisé : on sérialise toute la réponse
+            # (ça ne devrait normalement pas arriver)
+            ai_text = json.dumps(data)
+
         ai_text = ai_text.strip()
-        # ==================================================
+        # ========================================
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI API error: {e}",
+            detail=f"OpenAI API error: {e}"
         )
+
 
     # 6) On tente de parser le JSON renvoyé par le modèle
     try:
