@@ -666,18 +666,24 @@ Rules:
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=90)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = requests.post(url, headers=headers, json=payload, timeout=90)
+    resp.raise_for_status()
+    data = resp.json()
 
-        # Format Responses API:
-        # data["output"][0]["content"][0]["text"]["value"]
+    # OpenAI Responses API 2025
+    ai_text = data.get("output_text")
+
+    if not ai_text:
+        # fallback legacy format
         ai_text = data["output"][0]["content"][0]["text"]["value"]
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI API error: {e}"
-        )
+
+except Exception as e:
+    raise HTTPException(
+        status_code=500,
+        detail=f"OpenAI API error: {e}"
+    )
+ai_text = ai_text.strip()
+
 
     # 6) On essaye de parser le JSON renvoyé par le modèle
     try:
