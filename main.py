@@ -828,7 +828,7 @@ Rules:
         )
 
 
-    # 6) On tente de parser le JSON renvoyé par le modèle
+    # 6) On tente de parser JSON
     try:
         sections = json.loads(ai_text)
 
@@ -846,27 +846,39 @@ Rules:
         ]
 
         missing = [f for f in required_fields if f not in sections]
+
+        # 🔹 Si le JSON n'a pas tous les champs attendus,
+        # on NE lève plus d'erreur 500 : on utilise simplement
+        # tout le texte de l'IA comme rapport brut.
         if missing:
-            raise HTTPException(
-                status_code=500,
-                detail=f"OpenAI response missing required fields: {missing}",
+            full_report = ai_text.strip()
+
+            REPORTS[project_id] = {
+                "project_id": project_id,
+                "report_markdown": full_report,
+            }
+
+            return ReportResponse(
+                project_id=project_id,
+                report_markdown=full_report,
             )
 
+        # 🔹 Cas idéal : tous les champs sont présents
         parts = []
-        parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
-        parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
-        parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
-        parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
-        parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
-        parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
-        parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
-        parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
-        parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
-        parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
+        parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections.get("narrative_markdown", ""))
+        parts.append("## CALCULATION NOTES\n\n" + sections.get("calc_notes_markdown", ""))
+        parts.append("## SCHEMATICS OVERVIEW\n\n" + sections.get("schematics_markdown", ""))
+        parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections.get("datasheets_markdown", ""))
+        parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections.get("boq_basic_markdown", ""))
+        parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections.get("boq_high_end_markdown", ""))
+        parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections.get("boq_luxury_markdown", ""))
+        parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections.get("structural_spec_markdown", ""))
+        parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections.get("mepf_spec_markdown", ""))
+        parts.append("## DISCLAIMER\n\n" + sections.get("disclaimer_markdown", ""))
 
         full_report = "\n\n---\n\n".join(parts)
 
-        # 🔹 enregistrer dans REPORTS pour DOCX / PDF
+        # On stocke dans REPORTS pour les exports DOCX/PDF
         REPORTS[project_id] = {
             "project_id": project_id,
             "report_markdown": full_report,
@@ -885,7 +897,36 @@ Rules:
         return ReportResponse(
             project_id=project_id,
             report_markdown=full_report,
+            narrative_markdown=sections.get("narrative_markdown", ""),
+            calc_notes_markdown=sections.get("calc_notes_markdown", ""),
+            schematics_markdown=sections.get("schematics_markdown", ""),
+            datasheets_markdown=sections.get("datasheets_markdown", ""),
+            boq_basic_markdown=sections.get("boq_basic_markdown", ""),
+            boq_high_end_markdown=sections.get("boq_high_end_markdown", ""),
+            boq_luxury_markdown=sections.get("boq_luxury_markdown", ""),
+            structural_spec_markdown=sections.get("structural_spec_markdown", ""),
+            mepf_spec_markdown=sections.get("mepf_spec_markdown", ""),
+            disclaimer_markdown=sections.get("disclaimer_markdown", ""),
         )
+
+    except HTTPException:
+        # on relance tel quel si on a déjà construit un message clair
+        raise
+    except Exception:
+        # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
+        # on renvoie le texte brut quand même.
+        full_report = ai_text.strip()
+
+        REPORTS[project_id] = {
+            "project_id": project_id,
+            "report_markdown": full_report,
+        }
+
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=full_report,
+        )
+
 
     except HTTPException:
         # on relance tel quel si on a déjà construit un message clair
