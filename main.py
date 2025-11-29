@@ -943,6 +943,70 @@ Rules:
             report_markdown=ai_text,
         )
 
+# ============================================
+# EXPORT DOCX
+# ============================================
+@app.get("/projects/{project_id}/export/docx")
+async def export_docx(project_id: str):
+
+    if project_id not in REPORTS:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report = REPORTS[project_id]["report_markdown"]
+
+    # Génération DOCX
+    document = Document()
+    for line in report.split("\n"):
+        document.add_paragraph(line)
+
+    buffer = BytesIO()
+    document.save(buffer)
+    buffer.seek(0)
+
+    filename = f"{project_id}.docx"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
+# ============================================
+# EXPORT PDF
+# ============================================
+@app.get("/projects/{project_id}/export/pdf")
+async def export_pdf(project_id: str):
+
+    if project_id not in REPORTS:
+        raise HTTPException(status_code=404, detail="Report not found")
+
+    report = REPORTS[project_id]["report_markdown"]
+
+    buffer = BytesIO()
+    c = canvas.Canvas(buffer, pagesize=A4)
+
+    # Placement basique du texte dans la page
+    x, y = 40, 800
+    for line in report.split("\n"):
+        c.drawString(x, y, line)
+        y -= 15
+        if y < 40:
+            c.showPage()
+            y = 800
+
+    c.save()
+    buffer.seek(0)
+
+    filename = f"{project_id}.pdf"
+
+    return StreamingResponse(
+        buffer,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+
 # =====================================================================
 # 📤 Endpoints d'export DOCX et PDF
 # =====================================================================
@@ -965,6 +1029,7 @@ def _get_report_dict_or_404(project_id: str) -> dict:
         status_code=404,
         detail="Report not found. Run analysis and report generation first.",
     )
+
 
 
 @app.get("/projects/{project_id}/export/docx")
