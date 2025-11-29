@@ -665,23 +665,24 @@ Rules:
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
+    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
 
-        # ----------- NOUVEL EXTRACTION 2024/2025 ----------
-        ai_text = data.get("output_text", "")
-        if not ai_text:
-            ai_text = data["output"][0]["content"][0]["text"]["value"]
+    # ===== NOUVELLE EXTRACTION RÉPONSES 2024/2025 =====
+    ai_text = data.get("output_text", "")
+    if not ai_text:
+        ai_text = data["output"][0]["content"][0]["text"]["value"]
 
-        ai_text = ai_text.strip()  # nettoyer whitespace
-        # ---------------------------------------------------
+    ai_text = ai_text.strip()  # nettoyage
+    # ==================================================
 
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI API error: {e}"
-        )
+except Exception as e:
+    raise HTTPException(
+        status_code=500,
+        detail=f"OpenAI API error: {e}"
+    )
+
 
     # 6) On tente de parser JSON
     try:
