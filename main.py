@@ -604,7 +604,7 @@ async def generate_report(project_id: str) -> ReportResponse:
             detail="Engineering result not found. Run analysis first."
         )
 
-    # 2) Clé OpenAI
+    # 2) Récupérer clé OpenAI
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         raise HTTPException(
@@ -615,12 +615,11 @@ async def generate_report(project_id: str) -> ReportResponse:
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
 
-    # 3) Sérialiser en JSON pour le prompt
+    # 3) Convertir en JSON (pour le prompt)
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # 4) Prompt : on demande un **JSON** structuré
-    # ATTENTION : les {{ }} servent à échapper les accolades dans le f-string
+    # 4) Prompt pour GPT
     prompt = f"""
 You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
 
@@ -649,12 +648,12 @@ Using ONLY this data and industry best practices, produce ONE valid JSON object 
 
 Rules:
 - Respond with **valid JSON only**, no extra text.
-- Each field must contain well-structured Markdown, with headings (##, ###), bullet lists and tables where useful.
-- Use realistic but generic values when exact data is missing, and clearly mark assumptions.
+- Each field must contain well-structured Markdown with headings, tables, bullet lists.
+- Use realistic but generic values when exact data is missing.
 - Aim for professional, client-ready wording.
 """
 
-    # 5) Appel à l’API OpenAI Responses
+    # 5) Appel API OpenAI Responses
     url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
@@ -666,26 +665,25 @@ Rules:
     }
 
     try:
-    resp = requests.post(url, headers=headers, json=payload, timeout=90)
-    resp.raise_for_status()
-    data = resp.json()
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
+        resp.raise_for_status()
+        data = resp.json()
 
-    # OpenAI Responses API 2025
-    ai_text = data.get("output_text")
+        # ----------- NOUVEL EXTRACTION 2024/2025 ----------
+        ai_text = data.get("output_text", "")
+        if not ai_text:
+            ai_text = data["output"][0]["content"][0]["text"]["value"]
 
-    if not ai_text:
-        # fallback legacy format
-        ai_text = data["output"][0]["content"][0]["text"]["value"]
+        ai_text = ai_text.strip()  # nettoyer whitespace
+        # ---------------------------------------------------
 
-except Exception as e:
-    raise HTTPException(
-        status_code=500,
-        detail=f"OpenAI API error: {e}"
-    )
-ai_text = ai_text.strip()
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI API error: {e}"
+        )
 
-
-    # 6) On essaye de parser le JSON renvoyé par le modèle
+    # 6) On tente de parser JSON
     try:
         sections = json.loads(ai_text)
 
@@ -709,19 +707,19 @@ ai_text = ai_text.strip()
                 detail=f"OpenAI response missing required fields: {missing}"
             )
 
-        # 7) Pour l’instant, on concatène tout dans un seul `report_markdown`
-        parts = []
-
-        parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
-        parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
-        parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
-        parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
-        parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
-        parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
-        parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
-        parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
-        parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
-        parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
+        # 7) Fusionner tout en un rapport Markdown
+        parts = [
+            "## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"],
+            "## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"],
+            "## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"],
+            "## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"],
+            "## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"],
+            "## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"],
+            "## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"],
+            "## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"],
+            "## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"],
+            "## DISCLAIMER\n\n" + sections["disclaimer_markdown"],
+        ]
 
         full_report = "\n\n---\n\n".join(parts)
 
@@ -731,15 +729,14 @@ ai_text = ai_text.strip()
         )
 
     except HTTPException:
-        # on relance tel quel si on a déjà construit un message clair
         raise
     except Exception:
-        # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
-        # on renvoie le texte brut quand même.
+        # 8) Fallback si le JSON est imparfait
         return ReportResponse(
             project_id=project_id,
             report_markdown=ai_text,
         )
+
 
 
 
