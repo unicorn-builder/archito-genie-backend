@@ -664,14 +664,19 @@ Rules:
         "input": prompt,
     }
 
-        # ===== UNIVERSAL EXTRACTION FOR OPENAI RESPONSES API (2024/2025) =====
+    try:
+    resp = requests.post(url, headers=headers, json=payload, timeout=120)
+    resp.raise_for_status()
+    data = resp.json()
+
+    # ===== UNIVERSAL EXTRACTION FOR OPENAI RESPONSES API (2024/2025) =====
     ai_text = ""
 
-    # 1) New unified field
-    if "output_text" in data:
+    # 1) New unified field from Responses API
+    if isinstance(data, dict) and "output_text" in data:
         ai_text = data["output_text"]
 
-    # 2) Text inside "output" array (latest Responses format)
+    # 2) Latest Responses format (array of content blocks)
     if not ai_text:
         try:
             ai_text = (
@@ -681,14 +686,14 @@ Rules:
         except Exception:
             pass
 
-    # 3) Older OpenAI response formats
+    # 3) Older ChatCompletion-style fallback
     if not ai_text:
         try:
             ai_text = data["choices"][0]["message"]["content"]
         except Exception:
             pass
 
-    # 4) If still nothing → error
+    # 4) If still nothing → throw descriptive error
     if not ai_text or not isinstance(ai_text, str):
         raise HTTPException(
             status_code=500,
@@ -698,35 +703,12 @@ Rules:
     ai_text = ai_text.strip()
     # ======================================================================
 
-    
-        # 2. Structure Responses "output -> content -> text"
-        elif "output" in data:
-            try:
-                ai_text = data["output"][0]["content"][0]["text"]["value"]
-            except Exception:
-                pass
-    
-        # 3. Structure Chat Completions (choices)
-        if not ai_text and "choices" in data:
-            try:
-                ai_text = data["choices"][0]["message"]["content"]
-            except Exception:
-                try:
-                    ai_text = data["choices"][0]["text"]
-                except Exception:
-                    pass
-    
-        # 4. Dernier fallback : impossible d’extraire
-        if not ai_text:
-            raise ValueError(f"Unable to extract AI text. Raw API response: {data}")
-    
-        ai_text = ai_text.strip()
-    
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI API error: {e}"
-        )
+except Exception as e:
+    raise HTTPException(
+        status_code=500,
+        detail=f"OpenAI API error: {e}"
+    )
+
 
 
 
