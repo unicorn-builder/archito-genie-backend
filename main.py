@@ -54,6 +54,7 @@ app.mount("/files", StaticFiles(directory="files"), name="files")
 # In-memory storage (replace with database in production)
 PROJECTS: dict = {}
 ENGINEERING_RESULTS: dict = {}
+REPORTS: dict[str, dict[str, str]] = {}
 
 # ==============================================================================
 # PYDANTIC MODELS
@@ -120,24 +121,20 @@ class EngineeringResult(BaseModel):
 
 class ReportResponse(BaseModel):
     project_id: str
-
-    # Rapport complet (pour compatibilité + vue globale)
     report_markdown: str
 
-    # Sections séparées (optionnelles pour l’instant)
+    # Sections détaillées (toutes optionnelles pour éviter les 500)
     narrative_markdown: Optional[str] = None
     calc_notes_markdown: Optional[str] = None
     schematics_markdown: Optional[str] = None
-
+    datasheets_markdown: Optional[str] = None
     boq_basic_markdown: Optional[str] = None
     boq_high_end_markdown: Optional[str] = None
     boq_luxury_markdown: Optional[str] = None
-
-    datasheets_markdown: Optional[str] = None
-
-    # Plus tard : spécifications pour plans REVIT/DWG
     structural_spec_markdown: Optional[str] = None
     mepf_spec_markdown: Optional[str] = None
+    disclaimer_markdown: Optional[str] = None
+
 
 
 
@@ -757,6 +754,10 @@ Rules:
             report_markdown=ai_text,
         )
 
+    # Sauvegarde des sections en mémoire pour réutilisation (docx/pdf/boq/etc.)
+    REPORTS[project_id] = sections
+
+    
     # 7) Construction du rapport Markdown
     parts = []
     parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
@@ -775,7 +776,9 @@ Rules:
     return ReportResponse(
         project_id=project_id,
         report_markdown=full_report,
+        **sections,
     )
+
 
 
 
