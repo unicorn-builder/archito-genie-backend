@@ -912,44 +912,44 @@ Rules:
     parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
     parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
 
-        full_report = "\n\n---\n\n".join(parts)
+    full_report = "\n\n---\n\n".join(parts)
 
-        # 🔹 On stocke aussi le rapport en mémoire pour les exports DOCX/PDF
-        REPORTS[project_id] = {
-            "project_id": project_id,
-            "report_markdown": full_report,
-            "narrative_markdown": sections.get("narrative_markdown", ""),
-            "calc_notes_markdown": sections.get("calc_notes_markdown", ""),
-            "schematics_markdown": sections.get("schematics_markdown", ""),
-            "datasheets_markdown": sections.get("datasheets_markdown", ""),
-            "boq_basic_markdown": sections.get("boq_basic_markdown", ""),
-            "boq_high_end_markdown": sections.get("boq_high_end_markdown", ""),
-            "boq_luxury_markdown": sections.get("boq_luxury_markdown", ""),
-            "structural_spec_markdown": sections.get("structural_spec_markdown", ""),
-            "mepf_spec_markdown": sections.get("mepf_spec_markdown", ""),
-            "disclaimer_markdown": sections.get("disclaimer_markdown", ""),
-        }
+    # 🔹 On stocke aussi le rapport en mémoire pour les exports DOCX/PDF
+    REPORTS[project_id] = {
+        "project_id": project_id,
+        "report_markdown": full_report,
+        "narrative_markdown": sections.get("narrative_markdown", ""),
+        "calc_notes_markdown": sections.get("calc_notes_markdown", ""),
+        "schematics_markdown": sections.get("schematics_markdown", ""),
+        "datasheets_markdown": sections.get("datasheets_markdown", ""),
+        "boq_basic_markdown": sections.get("boq_basic_markdown", ""),
+        "boq_high_end_markdown": sections.get("boq_high_end_markdown", ""),
+        "boq_luxury_markdown": sections.get("boq_luxury_markdown", ""),
+        "structural_spec_markdown": sections.get("structural_spec_markdown", ""),
+        "mepf_spec_markdown": sections.get("mepf_spec_markdown", ""),
+        "disclaimer_markdown": sections.get("disclaimer_markdown", ""),
+    }
 
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=full_report,
-        )
+    return ReportResponse(
+        project_id=project_id,
+        report_markdown=full_report,
+    )
 
-    except HTTPException:
-        # on relance tel quel si on a déjà construit un message clair
-        raise
-    except Exception:
-        # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
-        # on stocke quand même quelque chose d'exportable
-        REPORTS[project_id] = {
-            "project_id": project_id,
-            "report_markdown": ai_text,
-        }
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=ai_text,
-        )
-    # =====================================================================
+except HTTPException:
+    # on relance tel quel si on a déjà construit un message clair
+    raise
+except Exception:
+    # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
+    # on stocke quand même quelque chose d'exportable
+    REPORTS[project_id] = {
+        "project_id": project_id,
+        "report_markdown": ai_text,
+    }
+    return ReportResponse(
+        project_id=project_id,
+        report_markdown=ai_text,
+    )
+# =====================================================================
 # 📤 Endpoints d'export DOCX et PDF
 # =====================================================================
 
