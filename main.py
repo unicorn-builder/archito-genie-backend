@@ -54,7 +54,7 @@ app.mount("/files", StaticFiles(directory="files"), name="files")
 # In-memory storage (replace with database in production)
 PROJECTS: dict = {}
 ENGINEERING_RESULTS: dict = {}
-REPORTS: dict[str, dict[str, str]] = {}
+REPORTS: dict[str, ReportResponse] = {}
 
 # ==============================================================================
 # PYDANTIC MODELS
