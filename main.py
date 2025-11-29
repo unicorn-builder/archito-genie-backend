@@ -614,41 +614,41 @@ async def generate_report(project_id: str):
     project_json = json.dumps(project.dict(), indent=2)
 
     # 3) Construire le prompt : on demande un **JSON strict**
-        prompt = f"""
-You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
-
-You receive two JSON inputs:
-
-1) engineering_result_json:
-{result_json}
-
-2) project_json:
-{project_json}
-
-Using ONLY this data, generate all sections of a conceptual design report for this project.
-
-You must return a SINGLE JSON object (no extra text, no markdown fences), with exactly these top-level keys:
-
-- "narrative_markdown"
-- "calc_notes_markdown"
-- "schematics_markdown"
-- "datasheets_markdown"
-- "boq_basic_markdown"
-- "boq_high_end_markdown"
-- "boq_luxury_markdown"
-- "structural_spec_markdown"
-- "mepf_spec_markdown"
-- "disclaimer_markdown"
-
-For each key:
-
-- The value must be a **markdown string** representing that section.
-- Do NOT include any JSON code blocks or ``` fences inside the values.
-- Make the content technically detailed and consistent with the project data and engineering results.
-
-Return ONLY the JSON object, nothing else.
-"""
-    try:
+            prompt = f"""
+    You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
+    
+    You receive two JSON inputs:
+    
+    1) engineering_result_json:
+    {result_json}
+    
+    2) project_json:
+    {project_json}
+    
+    Using ONLY this data, generate all sections of a conceptual design report for this project.
+    
+    You must return a SINGLE JSON object (no extra text, no markdown fences), with exactly these top-level keys:
+    
+    - "narrative_markdown"
+    - "calc_notes_markdown"
+    - "schematics_markdown"
+    - "datasheets_markdown"
+    - "boq_basic_markdown"
+    - "boq_high_end_markdown"
+    - "boq_luxury_markdown"
+    - "structural_spec_markdown"
+    - "mepf_spec_markdown"
+    - "disclaimer_markdown"
+    
+    For each key:
+    
+    - The value must be a **markdown string** representing that section.
+    - Do NOT include any JSON code blocks or ``` fences inside the values.
+    - Make the content technically detailed and consistent with the project data and engineering results.
+    
+    Return ONLY the JSON object, nothing else.
+    """
+        try:
 
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
     except Exception as e:
