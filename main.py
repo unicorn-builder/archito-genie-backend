@@ -1095,6 +1095,101 @@ async def export_schematics_svg(project_id: str):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+# ==========================================================
+# 5B - HERO IMAGE (PNG) GÉNÉRÉE PAR OPENAI
+# ==========================================================
+@app.get("/projects/{project_id}/schematics/hero", response_class=StreamingResponse)
+async def generate_hero_image(project_id: str):
+    """
+    Génère une image 'hero' (PNG) à partir des données de projet
+    et des résultats d'ingénierie, en appelant l'API OpenAI Images.
+    """
+
+    # 1) Vérifier que le projet + l'analyse existent
+    if project_id not in PROJECTS or project_id not in ENGINEERING_RESULTS:
+        raise HTTPException(
+            status_code=404,
+            detail="Project or engineering result not found. Run analysis first."
+        )
+
+    project = PROJECTS[project_id]
+    engineering_result = ENGINEERING_RESULTS[project_id]
+
+    # 2) Clé OpenAI
+    openai_api_key = os.environ.get("OPENAI_API_KEY")
+    if not openai_api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY not configured on server"
+        )
+
+    # 3) Préparation du prompt pour l'image
+    project_json = json.dumps(project.dict(), indent=2)
+    engineering_json = json.dumps(engineering_result.dict(), indent=2)
+
+    prompt = f"""
+High-end architectural concept diagram for an engineering and sustainability design report.
+
+Context:
+- Project data (JSON):
+{project_json}
+
+- Engineering & sustainability analysis (JSON):
+{engineering_json}
+
+Style and requirements:
+- Clean, professional, investor-ready hero illustration
+- Isometric or axonometric style, with clear volumes
+- 3 main labelled zones by visual grouping only:
+  * Structure
+  * MEPF & Automation
+  * Sustainability
+- Neutral light background, soft shadows, modern palette
+- No text labels in the image itself (only visual groupings)
+- No humans, no logos, no UI mockups
+- Aspect ratio: square 1:1, usable as hero image on a web app landing page
+"""
+
+    # 4) Appel API OpenAI Images
+    url = "https://api.openai.com/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-image-1",
+        "prompt": prompt,
+        "size": "1024x1024",
+        "response_format": "b64_json",
+    }
+
+    try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp.raise_for_status()
+        data = resp.json()
+
+        # Récupérer l'image en base64
+        image_b64 = data["data"][0]["b64_json"]
+        image_bytes = base64.b64decode(image_b64)
+
+        # Stream binaire vers le client
+        stream = BytesIO(image_bytes)
+        stream.seek(0)
+
+        filename = f"{project_id}_hero.png"
+
+        return StreamingResponse(
+            stream,
+            media_type="image/png",
+            headers={"Content-Disposition": f'inline; filename="{filename}"'}
+        )
+
+    except Exception as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI image API error: {e}"
+        )
+
 
 # =====================================================================
 # 📤 Endpoints d'export DOCX et PDF
