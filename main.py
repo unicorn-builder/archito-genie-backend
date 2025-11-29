@@ -739,25 +739,25 @@ async def generate_report(project_id: str) -> ReportResponse:
     if project_id not in ENGINEERING_RESULTS:
         raise HTTPException(
             status_code=404,
-            detail="Engineering result not found. Run analysis first."
+            detail="Engineering result not found. Run analysis first.",
         )
 
-    # 2) Récupérer clé OpenAI
+    # 2) Clé OpenAI
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
         raise HTTPException(
             status_code=500,
-            detail="OPENAI_API_KEY not configured on server"
+            detail="OPENAI_API_KEY not configured on server",
         )
 
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
 
-    # 3) Convertir en JSON (pour le prompt)
+    # 3) Sérialiser en JSON pour le prompt
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # 4) Prompt pour GPT
+    # 4) Prompt : on demande un JSON structuré
     prompt = f"""
 You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
 
@@ -785,13 +785,13 @@ Using ONLY this data and industry best practices, produce ONE valid JSON object 
 }}
 
 Rules:
-- Respond with **valid JSON only**, no extra text.
-- Each field must contain well-structured Markdown with headings, tables, bullet lists.
-- Use realistic but generic values when exact data is missing.
+- Respond with valid JSON only, no extra text.
+- Each field must contain well-structured Markdown, with headings (##, ###), bullet lists and tables where useful.
+- Use realistic but generic values when exact data is missing, and clearly mark assumptions.
 - Aim for professional, client-ready wording.
 """
 
-    # 5) Appel API OpenAI Responses
+    # 5) Appel à l’API OpenAI Responses
     url = "https://api.openai.com/v1/responses"
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
@@ -802,153 +802,98 @@ Rules:
         "input": prompt,
     }
 
-    payload = {
-        "model": "gpt-4.1-mini",
-        "input": prompt,
-    }
-
-    # 5) Appel à l’API OpenAI Responses
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
 
-        # ===== EXTRACTION ROBUSTE DU TEXTE RÉPONSE =====
-        ai_text = None
-
-        if isinstance(data, dict):
-            # 1) Champ agrégé "output_text" (cas le plus simple)
-            if isinstance(data.get("output_text"), str):
-                ai_text = data["output_text"]
-            else:
-                # 2) Nouveau schéma "output" -> "content" -> "text" -> "value"
-                out = data.get("output")
-                first_output = None
-
-                if isinstance(out, list) and out:
-                    first_output = out[0]
-                elif isinstance(out, dict):
-                    first_output = out
-
-                if isinstance(first_output, dict):
-                    content = first_output.get("content")
-                    first_content = None
-
-                    if isinstance(content, list) and content:
-                        first_content = content[0]
-                    elif isinstance(content, dict):
-                        first_content = content
-
-                    if isinstance(first_content, dict):
-                        text_block = first_content.get("text")
-                        if isinstance(text_block, dict) and "value" in text_block:
-                            ai_text = text_block["value"]
-                        elif isinstance(text_block, str):
-                            ai_text = text_block
-
-        # 3) Dernier recours : corps brut
+        # ===== NOUVELLE EXTRACTION RÉPONSES 2024/2025 =====
+        ai_text = data.get("output_text", "")
         if not ai_text:
-            ai_text = resp.text
-
-        ai_text = str(ai_text).strip()
-        # ===============================================
+            ai_text = data["output"][0]["content"][0]["text"]["value"]
+        ai_text = ai_text.strip()
+        # ==================================================
 
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI API error: {e}"
+            detail=f"OpenAI API error: {e}",
         )
 
     # 6) On tente de parser le JSON renvoyé par le modèle
     try:
         sections = json.loads(ai_text)
+
+        required_fields = [
+            "narrative_markdown",
+            "calc_notes_markdown",
+            "schematics_markdown",
+            "datasheets_markdown",
+            "boq_basic_markdown",
+            "boq_high_end_markdown",
+            "boq_luxury_markdown",
+            "structural_spec_markdown",
+            "mepf_spec_markdown",
+            "disclaimer_markdown",
+        ]
+
+        missing = [f for f in required_fields if f not in sections]
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail=f"OpenAI response missing required fields: {missing}",
+            )
+
+        parts = []
+        parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
+        parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
+        parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
+        parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
+        parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
+        parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
+        parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
+        parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
+        parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
+        parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
+
+        full_report = "\n\n---\n\n".join(parts)
+
+        # 🔹 enregistrer dans REPORTS pour DOCX / PDF
+        REPORTS[project_id] = {
+            "project_id": project_id,
+            "report_markdown": full_report,
+            "narrative_markdown": sections.get("narrative_markdown", ""),
+            "calc_notes_markdown": sections.get("calc_notes_markdown", ""),
+            "schematics_markdown": sections.get("schematics_markdown", ""),
+            "datasheets_markdown": sections.get("datasheets_markdown", ""),
+            "boq_basic_markdown": sections.get("boq_basic_markdown", ""),
+            "boq_high_end_markdown": sections.get("boq_high_end_markdown", ""),
+            "boq_luxury_markdown": sections.get("boq_luxury_markdown", ""),
+            "structural_spec_markdown": sections.get("structural_spec_markdown", ""),
+            "mepf_spec_markdown": sections.get("mepf_spec_markdown", ""),
+            "disclaimer_markdown": sections.get("disclaimer_markdown", ""),
+        }
+
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=full_report,
+        )
+
+    except HTTPException:
+        # on relance tel quel si on a déjà construit un message clair
+        raise
     except Exception:
-        # Pas du JSON -> texte brut
+        # Fallback : si le modèle n’a pas renvoyé du vrai JSON,
+        # on stocke quand même quelque chose d'exportable
+        REPORTS[project_id] = {
+            "project_id": project_id,
+            "report_markdown": ai_text,
+        }
         return ReportResponse(
             project_id=project_id,
             report_markdown=ai_text,
         )
 
-    if not isinstance(sections, dict):
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=ai_text,
-        )
-
-    required_fields = [
-        "narrative_markdown",
-        "calc_notes_markdown",
-        "schematics_markdown",
-        "datasheets_markdown",
-        "boq_basic_markdown",
-        "boq_high_end_markdown",
-        "boq_luxury_markdown",
-        "structural_spec_markdown",
-        "mepf_spec_markdown",
-        "disclaimer_markdown",
-    ]
-
-    missing = [f for f in required_fields if f not in sections]
-    if missing:
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=ai_text,
-        )
-
-    # Sauvegarde des sections en mémoire pour réutilisation (docx/pdf/boq/etc.)
-    REPORTS[project_id] = sections
-
-    
-    # 7) Construction du rapport Markdown
-    parts = []
-    parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
-    parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
-    parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
-    parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
-    parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
-    parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
-    parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
-    parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
-    parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
-    parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
-
-    full_report = "\n\n---\n\n".join(parts)
-
-    # 🔹 On stocke aussi le rapport en mémoire pour les exports DOCX/PDF
-    REPORTS[project_id] = {
-        "project_id": project_id,
-        "report_markdown": full_report,
-        "narrative_markdown": sections.get("narrative_markdown", ""),
-        "calc_notes_markdown": sections.get("calc_notes_markdown", ""),
-        "schematics_markdown": sections.get("schematics_markdown", ""),
-        "datasheets_markdown": sections.get("datasheets_markdown", ""),
-        "boq_basic_markdown": sections.get("boq_basic_markdown", ""),
-        "boq_high_end_markdown": sections.get("boq_high_end_markdown", ""),
-        "boq_luxury_markdown": sections.get("boq_luxury_markdown", ""),
-        "structural_spec_markdown": sections.get("structural_spec_markdown", ""),
-        "mepf_spec_markdown": sections.get("mepf_spec_markdown", ""),
-        "disclaimer_markdown": sections.get("disclaimer_markdown", ""),
-    }
-
-    return ReportResponse(
-        project_id=project_id,
-        report_markdown=full_report,
-    )
-
-except HTTPException:
-    # on relance tel quel si on a déjà construit un message clair
-    raise
-except Exception:
-    # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
-    # on stocke quand même quelque chose d'exportable
-    REPORTS[project_id] = {
-        "project_id": project_id,
-        "report_markdown": ai_text,
-    }
-    return ReportResponse(
-        project_id=project_id,
-        report_markdown=ai_text,
-    )
 # =====================================================================
 # 📤 Endpoints d'export DOCX et PDF
 # =====================================================================
