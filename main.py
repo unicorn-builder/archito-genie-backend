@@ -669,12 +669,34 @@ Rules:
         resp.raise_for_status()
         data = resp.json()
     
-        # ===== NOUVELLE EXTRACTION RÉPONSES 2024/2025 =====
-        ai_text = data.get("output_text", "")
+        ai_text = None
+    
+        # 1. Nouvelle API Responses
+        if "output_text" in data:
+            ai_text = data["output_text"]
+    
+        # 2. Structure Responses "output -> content -> text"
+        elif "output" in data:
+            try:
+                ai_text = data["output"][0]["content"][0]["text"]["value"]
+            except Exception:
+                pass
+    
+        # 3. Structure Chat Completions (choices)
+        if not ai_text and "choices" in data:
+            try:
+                ai_text = data["choices"][0]["message"]["content"]
+            except Exception:
+                try:
+                    ai_text = data["choices"][0]["text"]
+                except Exception:
+                    pass
+    
+        # 4. Dernier fallback : impossible d’extraire
         if not ai_text:
-            ai_text = data["output"][0]["content"][0]["text"]["value"]
+            raise ValueError(f"Unable to extract AI text. Raw API response: {data}")
+    
         ai_text = ai_text.strip()
-        # ==================================================
     
     except Exception as e:
         raise HTTPException(
