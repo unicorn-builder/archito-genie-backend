@@ -664,16 +664,40 @@ Rules:
         "input": prompt,
     }
 
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-        resp.raise_for_status()
-        data = resp.json()
-    
-        ai_text = None
-    
-        # 1. Nouvelle API Responses
-        if "output_text" in data:
-            ai_text = data["output_text"]
+        # ===== UNIVERSAL EXTRACTION FOR OPENAI RESPONSES API (2024/2025) =====
+    ai_text = ""
+
+    # 1) New unified field
+    if "output_text" in data:
+        ai_text = data["output_text"]
+
+    # 2) Text inside "output" array (latest Responses format)
+    if not ai_text:
+        try:
+            ai_text = (
+                data["output"][0]["content"][0]["text"].get("value")
+                or data["output"][0]["content"][0]["text"].get("content")
+            )
+        except Exception:
+            pass
+
+    # 3) Older OpenAI response formats
+    if not ai_text:
+        try:
+            ai_text = data["choices"][0]["message"]["content"]
+        except Exception:
+            pass
+
+    # 4) If still nothing → error
+    if not ai_text or not isinstance(ai_text, str):
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI API error: Unable to extract AI text. Raw API response: {json.dumps(data)[:2000]}"
+        )
+
+    ai_text = ai_text.strip()
+    # ======================================================================
+
     
         # 2. Structure Responses "output -> content -> text"
         elif "output" in data:
