@@ -1095,6 +1095,8 @@ async def export_schematics_svg(project_id: str):
         headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
+
+
 # ============================================================
 # HERO IMAGE (WAW) – OpenAI Images (PNG)
 # ============================================================
