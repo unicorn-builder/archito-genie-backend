@@ -614,7 +614,7 @@ async def generate_report(project_id: str):
     project_json = json.dumps(project.dict(), indent=2)
 
     # 3) Construire le prompt : on demande un **JSON strict**
-            prompt = f"""
+        prompt = f"""
     You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
     
     You receive two JSON inputs:
