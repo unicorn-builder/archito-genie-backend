@@ -614,101 +614,42 @@ async def generate_report(project_id: str):
     project_json = json.dumps(project.dict(), indent=2)
 
     # 3) Construire le prompt : on demande un **JSON strict**
-    prompt = f"""
-    You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports
-    for residential and mixed-use buildings in Africa and hot-humid climates (like Dakar, Senegal).
-    
-    You receive:
-    
-    1) project metadata:
-    {project_json}
-    
-    2) conceptual engineering & sustainability analysis:
-    {result_json}
-    
-    You MUST return **exactly** the following JSON structure:
-    
-    {
-      "narrative_markdown": "string",
-      "calc_notes_markdown": "string",
-      "schematics_markdown": "string",
-      "datasheets_markdown": "string",
-      "boq_basic_markdown": "string",
-      "boq_high_end_markdown": "string",
-      "boq_luxury_markdown": "string",
-      "structural_spec_markdown": "string",
-      "mepf_spec_markdown": "string",
-      "disclaimer_markdown": "string"
-    }
-    
-    Every field MUST be a valid UTF-8 string.
-    Never leave a field empty. If needed, write a placeholder.
-    Never add extra keys.
-    Never add comments.
-    Return ONLY valid JSON without surrounding ```json fences.
-    
-    
-    
-    Guidelines for each field:
-    
-    - "narrative_markdown":
-      A full technical design narrative similar in structure & quality to a professional technical proposal
-      (like a BESS / HVAC / building design report).
-      Use clear sections with markdown headings (##, ###), tables and bullet points where relevant.
-      Cover: project overview, climate & code context, architectural summary, structural concept,
-      HVAC concept, plumbing & drainage concept, electrical/solar concept, automation/integration concept,
-      sustainability strategy.
-    
-    - "calc_notes_markdown":
-      Conceptual-level calculation notes (loads, capacities, airflow, pipe sizing logic, PV sizing logic, etc.).
-      Use subsections per discipline, formulas, explanation of assumptions and safety factors.
-    
-    - "schematics_markdown":
-      A textual description of the main schematics (HVAC, plumbing, electrical, solar, BMS),
-      listing key equipment, flows and main one-line / single-line diagrams described in words and tables.
-      This will later drive REVIT/DWG automation.
-    
-    - "datasheets_markdown":
-      A list of recommended key equipment (by category, not by brand unless necessary),
-      with required performance parameters, standards and typical ranges, similar to professional datasheet extracts.
-    
-    - "boq_basic_markdown", "boq_high_end_markdown", "boq_luxury_markdown":
-      Three alternative conceptual Bill of Quantities outlines (Basic / High-end / Luxury).
-      For each, provide a markdown table with: Item group, Short description, Unit, Qty (conceptual),
-      Quality level notes, Risk / assumptions notes.
-    
-    - "structural_spec_markdown":
-      Design brief for structural engineers: structural system, key spans, loads, exposure, durability,
-      foundations concept, coordination notes. This is a text spec that will later feed a BIM template.
-    
-    - "mepf_spec_markdown":
-      Design brief for MEPF engineers: HVAC system types, zoning, ventilation strategy,
-      plumbing & drainage strategy, water supply, electrical LV + solar + backup, automation & controls,
-      integration with local utilities. Also written as a spec to feed BIM templates.
-    
-    - "disclaimer_markdown":
-      A short but strong disclaimer reminding that this is a preliminary AI-generated conceptual study
-      that MUST be reviewed, completed and validated by licensed architects and engineers,
-      and must not be used as-is for construction, permitting or execution.
-    
-    VERY IMPORTANT:
-    - Return valid JSON only.
-    - All values must be UTF-8 strings (no null).
-    - Use concise but professional English.
-    """
+        prompt = f"""
+You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
 
-    # 4) Appel à l’API OpenAI /v1/responses
-    url = "https://api.openai.com/v1/responses"
-    headers = {
-        "Authorization": f"Bearer {openai_api_key}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "model": "gpt-4.1-mini",
-        "input": prompt,
-    }
+You receive two JSON inputs:
 
+1) engineering_result_json:
+{result_json}
+
+2) project_json:
+{project_json}
+
+Using ONLY this data, generate all sections of a conceptual design report for this project.
+
+You must return a SINGLE JSON object (no extra text, no markdown fences), with exactly these top-level keys:
+
+- "narrative_markdown"
+- "calc_notes_markdown"
+- "schematics_markdown"
+- "datasheets_markdown"
+- "boq_basic_markdown"
+- "boq_high_end_markdown"
+- "boq_luxury_markdown"
+- "structural_spec_markdown"
+- "mepf_spec_markdown"
+- "disclaimer_markdown"
+
+For each key:
+
+- The value must be a **markdown string** representing that section.
+- Do NOT include any JSON code blocks or ``` fences inside the values.
+- Make the content technically detailed and consistent with the project data and engineering results.
+
+Return ONLY the JSON object, nothing else.
+"""
     try:
+
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
     except Exception as e:
         raise HTTPException(status_code=502, detail=f"Error calling OpenAI API: {e}")
