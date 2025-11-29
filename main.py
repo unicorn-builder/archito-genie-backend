@@ -14,17 +14,39 @@ Run locally:
     uvicorn main:app --reload --host 0.0.0.0 --port 8000
 """
 
+# ===========================
+# 📌 IMPORTS — ARCHITO-GENIE
+# ===========================
+
+# Standard libs
 import os
 import uuid
 import json
-from typing import List, Optional
 from datetime import datetime
+from typing import List, Optional
+
+# FastAPI
 from fastapi import FastAPI, HTTPException, UploadFile, File, Form
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from fastapi.responses import StreamingResponse
+
+# Pydantic
 from pydantic import BaseModel
+
+# External requests
 import requests
-# from openai import OpenAI  # plus besoin de la librairie OpenAI
+
+# File generation (DOCX + PDF)
+from io import BytesIO
+from docx import Document
+from reportlab.lib.pagesizes import A4
+from reportlab.pdfgen import canvas
+
+# ===========================
+# 📌 FIN DES IMPORTS
+# ===========================
+
 
 # ==============================================================================
 # CONFIGURATION
@@ -453,6 +475,125 @@ def generate_boq_options(project: Project, structural: dict, mepf: dict) -> List
     return options
 
 
+# =====================================================================
+# 📎 Helpers pour construire DOCX et PDF à partir du rapport Markdown
+# =====================================================================
+
+SECTION_ORDER = [
+    "narrative_markdown",
+    "calc_notes_markdown",
+    "schematics_markdown",
+    "datasheets_markdown",
+    "boq_basic_markdown",
+    "boq_high_end_markdown",
+    "boq_luxury_markdown",
+    "structural_spec_markdown",
+    "mepf_spec_markdown",
+    "disclaimer_markdown",
+]
+
+
+def _build_plain_text_from_report(report: dict) -> str:
+    """
+    Transforme le dict REPORTS[project_id] en un gros texte brut.
+    (simple mais suffisant pour le MVP DOCX/PDF)
+    """
+    if report.get("report_markdown"):
+        return report["report_markdown"]
+
+    parts = []
+    for key in SECTION_ORDER:
+        value = report.get(key)
+        if value:
+            title = key.replace("_markdown", "").replace("_", " ").upper()
+            parts.append(f"## {title}\n\n{value}")
+
+    return "\n\n\n".join(parts) if parts else "No report content available."
+
+
+def _build_docx_stream(project_id: str, report: dict) -> BytesIO:
+    """
+    Construit un DOCX en mémoire et renvoie un BytesIO prêt à être streamé.
+    """
+    document = Document()
+
+    document.add_heading(
+        f"Archito-Genie Conceptual Design Report – {project_id}", level=1
+    )
+    document.add_paragraph("")  # ligne vide
+
+    text = _build_plain_text_from_report(report)
+
+    for line in text.split("\n"):
+        # On garde ça très simple : 1 paragraphe par ligne
+        document.add_paragraph(line)
+
+    stream = BytesIO()
+    document.save(stream)
+    stream.seek(0)
+    return stream
+
+
+def _build_pdf_stream(project_id: str, report: dict) -> BytesIO:
+    """
+    Construit un PDF simple (texte brut) en mémoire avec reportlab.
+    """
+    text = _build_plain_text_from_report(report)
+
+    stream = BytesIO()
+    c = canvas.Canvas(stream, pagesize=A4)
+
+    width, height = A4
+    x_margin = 40
+    y = height - 50
+
+    title = f"Archito-Genie Conceptual Design Report – {project_id}"
+    c.setFont("Helvetica-Bold", 14)
+    c.drawString(x_margin, y, title)
+    y -= 30
+
+    c.setFont("Helvetica", 10)
+
+    # Simple word wrap
+    max_width = width - 2 * x_margin
+    for raw_line in text.split("\n"):
+        line = raw_line.strip()
+        if not line:
+            y -= 12
+            if y < 50:
+                c.showPage()
+                c.setFont("Helvetica", 10)
+                y = height - 50
+            continue
+
+        words = line.split(" ")
+        current = ""
+        for w in words:
+            test = (current + " " + w).strip()
+            if c.stringWidth(test, "Helvetica", 10) <= max_width:
+                current = test
+            else:
+                c.drawString(x_margin, y, current)
+                y -= 12
+                if y < 50:
+                    c.showPage()
+                    c.setFont("Helvetica", 10)
+                    y = height - 50
+                current = w
+        if current:
+            c.drawString(x_margin, y, current)
+            y -= 12
+            if y < 50:
+                c.showPage()
+                c.setFont("Helvetica", 10)
+                y = height - 50
+
+    c.showPage()
+    c.save()
+    stream.seek(0)
+    return stream
+
+
 # ==============================================================================
 # API ENDPOINTS
 # ==============================================================================
@@ -771,12 +912,119 @@ Rules:
     parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
     parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
 
-    full_report = "\n\n---\n\n".join(parts)
+        full_report = "\n\n---\n\n".join(parts)
 
-    return ReportResponse(
-        project_id=project_id,
-        report_markdown=full_report,
-        **sections,
+        # 🔹 On stocke aussi le rapport en mémoire pour les exports DOCX/PDF
+        REPORTS[project_id] = {
+            "project_id": project_id,
+            "report_markdown": full_report,
+            "narrative_markdown": sections.get("narrative_markdown", ""),
+            "calc_notes_markdown": sections.get("calc_notes_markdown", ""),
+            "schematics_markdown": sections.get("schematics_markdown", ""),
+            "datasheets_markdown": sections.get("datasheets_markdown", ""),
+            "boq_basic_markdown": sections.get("boq_basic_markdown", ""),
+            "boq_high_end_markdown": sections.get("boq_high_end_markdown", ""),
+            "boq_luxury_markdown": sections.get("boq_luxury_markdown", ""),
+            "structural_spec_markdown": sections.get("structural_spec_markdown", ""),
+            "mepf_spec_markdown": sections.get("mepf_spec_markdown", ""),
+            "disclaimer_markdown": sections.get("disclaimer_markdown", ""),
+        }
+
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=full_report,
+        )
+
+    except HTTPException:
+        # on relance tel quel si on a déjà construit un message clair
+        raise
+    except Exception:
+        # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
+        # on stocke quand même quelque chose d'exportable
+        REPORTS[project_id] = {
+            "project_id": project_id,
+            "report_markdown": ai_text,
+        }
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=ai_text,
+        )
+    # =====================================================================
+# 📤 Endpoints d'export DOCX et PDF
+# =====================================================================
+
+def _get_report_dict_or_404(project_id: str) -> dict:
+    """
+    Récupère le rapport en mémoire ; si absent mais l'analyse existe,
+    on déclenche un generate_report(); sinon 404.
+    """
+    if project_id in REPORTS:
+        return REPORTS[project_id]
+
+    # Si on a déjà de l'ingénierie, on peut générer le rapport à la volée
+    if project_id in ENGINEERING_RESULTS:
+        # generate_report est async → on ne peut pas l'appeler ici directement
+        # Cette fonction est utilisée seulement dans les endpoints async ci-dessous
+        raise RuntimeError("generate_report must be awaited in async context.")
+
+    raise HTTPException(
+        status_code=404,
+        detail="Report not found. Run analysis and report generation first.",
+    )
+
+
+@app.get("/projects/{project_id}/export/docx")
+async def export_report_docx(project_id: str):
+    """
+    Export du rapport Archito-Genie en DOCX.
+    """
+    if project_id not in REPORTS:
+        if project_id in ENGINEERING_RESULTS:
+            # On génère le rapport si pas encore fait
+            await generate_report(project_id)
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="Report not found. Run analysis and report generation first.",
+            )
+
+    report = REPORTS[project_id]
+    stream = _build_docx_stream(project_id, report)
+
+    filename = f"archito-genie-report-{project_id}.docx"
+
+    return StreamingResponse(
+        stream,
+        media_type=(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        ),
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/projects/{project_id}/export/pdf")
+async def export_report_pdf(project_id: str):
+    """
+    Export du rapport Archito-Genie en PDF.
+    """
+    if project_id not in REPORTS:
+        if project_id in ENGINEERING_RESULTS:
+            await generate_report(project_id)
+        else:
+            raise HTTPException(
+                status_code=404,
+                detail="Report not found. Run analysis and report generation first.",
+            )
+
+    report = REPORTS[project_id]
+    stream = _build_pdf_stream(project_id, report)
+
+    filename = f"archito-genie-report-{project_id}.pdf"
+
+    return StreamingResponse(
+        stream,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
