@@ -1098,47 +1098,44 @@ async def export_schematics_svg(project_id: str):
 # ============================================================
 # HERO IMAGE (WAW) – OpenAI Images (PNG)
 # ============================================================
+# ============================================================
+# HERO IMAGE (PNG) - v1 Images API
+# ============================================================
 @app.get("/projects/{project_id}/schematics/hero")
-async def schematics_hero(project_id: str):
-    """
-    Génère une image 'hero' (PNG) à partir des données de projet et du rapport,
-    en appelant l'API OpenAI Images (gpt-image-1).
-    """
+async def generate_hero_image(project_id: str):
+    # 1) Vérifier que le projet et les résultats existent
+    project = PROJECTS.get(project_id)
+    engineering = ENGINEERING_RESULTS.get(project_id)
 
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
+    if project is None or engineering is None:
+        raise HTTPException(status_code=404, detail="Project or engineering results not found")
 
-    project = PROJECTS[project_id]
-    report_data = REPORTS.get(project_id, {})
-    report_text = report_data.get("report_markdown", "")
+    # 2) Récupérer des infos de contexte de manière sûre
+    #    (PROJECTS stocke un objet Pydantic, pas un dict)
+    project_name = getattr(project, "name", None) or "Conceptual Building"
+    location = getattr(project, "location", None) or "Dakar, Senegal"
+    levels = getattr(project, "levels", None) or 5
+    building_use = getattr(project, "building_use", None) or "mixed-use residential and commercial"
 
-    # On garde un contexte court pour le prompt image
-    if report_text:
-        context_snippet = report_text[:1200]
-    else:
-        context_snippet = project.get("description", "") or ""
+    # On peut aussi aller chercher un petit résumé dans engineering si tu veux
+    sustainability_summary = engineering.get("sustainability_summary", "") if isinstance(engineering, dict) else ""
 
-    project_name = project.get("name", "Conceptual Building")
-
+    # 3) Construire le prompt pour gpt-image-1
     prompt = f"""
-High-end isometric blueprint hero illustration for an architecture / MEPF / sustainability concept.
+Ultra-clean isometric hero illustration for a SaaS web app called Archito-Genie.
 
-- Show a single multi-storey building in 3D.
-- Visually split into three clearly separated zones or layers:
-  1) "Structure"
-  2) "MEPF & Automation"
-  3) "Sustainability"
-- Clean premium tech style, thin blueprint lines, soft gradients.
-- Color palette: deep blue, teal, light grey, white.
-- Minimal text ON image: only the three labels above plus the project title "{project_name}".
-- Background light and simple, with a lot of white space.
-- Composition suitable for a website hero banner or pitch deck cover.
-- No people, no logos, no UI screenshots.
+Show a modern {levels}-storey {building_use} project named "{project_name}" in {location},
+with three clearly separated zones labeled:
+- Structure
+- MEPF & Automation
+- Sustainability
 
-Project context to inspire the scene (DO NOT render this text, just use it for style and mood):
-{context_snippet}
+Style: light background, thin vector lines, subtle color palette, tech / product-landing feel,
+no people, no text except the three zone labels, high contrast, very crisp, suitable as a website hero image.
+{sustainability_summary}
 """.strip()
 
+    # 4) Appel API OpenAI Images (v1)
     url = "https://api.openai.com/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
@@ -1147,33 +1144,27 @@ Project context to inspire the scene (DO NOT render this text, just use it for s
     payload = {
         "model": "gpt-image-1",
         "prompt": prompt,
-        # Ta précédente erreur 400 vient très probablement d'une taille invalide.
-        # On utilise ici une taille officiellement supportée et large (hero).
-        "size": "1536x1024",
-        "n": 1,
-        "response_format": "b64_json",
+        "size": "1536x1024",          # format hero
+        "response_format": "b64_json" # on récupère l'image en base64
     }
 
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=90)
         resp.raise_for_status()
         data = resp.json()
-    except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"OpenAI image API error: {e}",
-        )
-
-    try:
         b64_data = data["data"][0]["b64_json"]
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"Unexpected image response format: {e}",
+            detail=f"OpenAI image API error: {e}"
         )
 
-    image_bytes = base64.b64decode(b64_data)
-    stream = BytesIO(image_bytes)
+    # 5) Décoder le base64 en PNG
+    import base64
+    png_bytes = base64.b64decode(b64_data)
+
+    stream = BytesIO()
+    stream.write(png_bytes)
     stream.seek(0)
 
     filename = f"{project_id}_hero.png"
@@ -1181,8 +1172,11 @@ Project context to inspire the scene (DO NOT render this text, just use it for s
     return StreamingResponse(
         stream,
         media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{filename}"'
+        },
     )
+
 
 
 
