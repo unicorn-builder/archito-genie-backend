@@ -664,7 +664,7 @@ Rules:
         "input": prompt,
     }
 
-        payload = {
+    payload = {
         "model": "gpt-4.1-mini",
         "input": prompt,
     }
@@ -708,7 +708,7 @@ Rules:
                         elif isinstance(text_block, str):
                             ai_text = text_block
 
-        # 3) Dernier recours : on prend le corps brut
+        # 3) Dernier recours : corps brut
         if not ai_text:
             ai_text = resp.text
 
@@ -725,13 +725,12 @@ Rules:
     try:
         sections = json.loads(ai_text)
     except Exception:
-        # Pas du JSON -> on renvoie le texte brut comme rapport
+        # Pas du JSON -> texte brut
         return ReportResponse(
             project_id=project_id,
             report_markdown=ai_text,
         )
 
-    # Si ce n’est pas un dict, idem : fallback texte brut
     if not isinstance(sections, dict):
         return ReportResponse(
             project_id=project_id,
@@ -753,13 +752,12 @@ Rules:
 
     missing = [f for f in required_fields if f not in sections]
     if missing:
-        # Le JSON ne suit pas le schéma attendu -> on renvoie quand même le texte brut
         return ReportResponse(
             project_id=project_id,
             report_markdown=ai_text,
         )
 
-    # 7) On construit un rapport Markdown complet à partir des sections
+    # 7) Construction du rapport Markdown
     parts = []
     parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
     parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
@@ -778,6 +776,7 @@ Rules:
         project_id=project_id,
         report_markdown=full_report,
     )
+
 
 
 
