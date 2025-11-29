@@ -664,108 +664,121 @@ Rules:
         "input": prompt,
     }
 
+        payload = {
+        "model": "gpt-4.1-mini",
+        "input": prompt,
+    }
+
+    # 5) Appel à l’API OpenAI Responses
     try:
         resp = requests.post(url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
         data = resp.json()
-    
-        # ===== UNIVERSAL EXTRACTION FOR OPENAI RESPONSES API (2024/2025) =====
-        ai_text = ""
-    
-        # 1) New unified field from Responses API
-        if isinstance(data, dict) and "output_text" in data:
-            ai_text = data["output_text"]
-    
-        # 2) Latest Responses format (array of content blocks)
+
+        # ===== EXTRACTION ROBUSTE DU TEXTE RÉPONSE =====
+        ai_text = None
+
+        if isinstance(data, dict):
+            # 1) Champ agrégé "output_text" (cas le plus simple)
+            if isinstance(data.get("output_text"), str):
+                ai_text = data["output_text"]
+            else:
+                # 2) Nouveau schéma "output" -> "content" -> "text" -> "value"
+                out = data.get("output")
+                first_output = None
+
+                if isinstance(out, list) and out:
+                    first_output = out[0]
+                elif isinstance(out, dict):
+                    first_output = out
+
+                if isinstance(first_output, dict):
+                    content = first_output.get("content")
+                    first_content = None
+
+                    if isinstance(content, list) and content:
+                        first_content = content[0]
+                    elif isinstance(content, dict):
+                        first_content = content
+
+                    if isinstance(first_content, dict):
+                        text_block = first_content.get("text")
+                        if isinstance(text_block, dict) and "value" in text_block:
+                            ai_text = text_block["value"]
+                        elif isinstance(text_block, str):
+                            ai_text = text_block
+
+        # 3) Dernier recours : on prend le corps brut
         if not ai_text:
-            try:
-                ai_text = (
-                    data["output"][0]["content"][0]["text"].get("value")
-                    or data["output"][0]["content"][0]["text"].get("content")
-                )
-            except Exception:
-                pass
-    
-        # 3) Older ChatCompletion-style fallback
-        if not ai_text:
-            try:
-                ai_text = data["choices"][0]["message"]["content"]
-            except Exception:
-                pass
-    
-        # 4) If still nothing → throw descriptive error
-        if not ai_text or not isinstance(ai_text, str):
-            raise HTTPException(
-                status_code=500,
-                detail=f"OpenAI API error: Unable to extract AI text. Raw API response: {json.dumps(data)[:2000]}"
-            )
-    
-        ai_text = ai_text.strip()
-        # ======================================================================
-    
+            ai_text = resp.text
+
+        ai_text = str(ai_text).strip()
+        # ===============================================
+
     except Exception as e:
         raise HTTPException(
             status_code=500,
             detail=f"OpenAI API error: {e}"
         )
 
-
-
-
-
-    # 6) On tente de parser JSON
+    # 6) On tente de parser le JSON renvoyé par le modèle
     try:
         sections = json.loads(ai_text)
-
-        required_fields = [
-            "narrative_markdown",
-            "calc_notes_markdown",
-            "schematics_markdown",
-            "datasheets_markdown",
-            "boq_basic_markdown",
-            "boq_high_end_markdown",
-            "boq_luxury_markdown",
-            "structural_spec_markdown",
-            "mepf_spec_markdown",
-            "disclaimer_markdown",
-        ]
-
-        missing = [f for f in required_fields if f not in sections]
-        if missing:
-            raise HTTPException(
-                status_code=500,
-                detail=f"OpenAI response missing required fields: {missing}"
-            )
-
-        # 7) Fusionner tout en un rapport Markdown
-        parts = [
-            "## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"],
-            "## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"],
-            "## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"],
-            "## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"],
-            "## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"],
-            "## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"],
-            "## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"],
-            "## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"],
-            "## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"],
-            "## DISCLAIMER\n\n" + sections["disclaimer_markdown"],
-        ]
-
-        full_report = "\n\n---\n\n".join(parts)
-
-        return ReportResponse(
-            project_id=project_id,
-            report_markdown=full_report,
-        )
-
-    except HTTPException:
-        raise
     except Exception:
-        # 8) Fallback si le JSON est imparfait
+        # Pas du JSON -> on renvoie le texte brut comme rapport
         return ReportResponse(
             project_id=project_id,
             report_markdown=ai_text,
         )
+
+    # Si ce n’est pas un dict, idem : fallback texte brut
+    if not isinstance(sections, dict):
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=ai_text,
+        )
+
+    required_fields = [
+        "narrative_markdown",
+        "calc_notes_markdown",
+        "schematics_markdown",
+        "datasheets_markdown",
+        "boq_basic_markdown",
+        "boq_high_end_markdown",
+        "boq_luxury_markdown",
+        "structural_spec_markdown",
+        "mepf_spec_markdown",
+        "disclaimer_markdown",
+    ]
+
+    missing = [f for f in required_fields if f not in sections]
+    if missing:
+        # Le JSON ne suit pas le schéma attendu -> on renvoie quand même le texte brut
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=ai_text,
+        )
+
+    # 7) On construit un rapport Markdown complet à partir des sections
+    parts = []
+    parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
+    parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
+    parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
+    parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
+    parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
+    parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
+    parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
+    parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
+    parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
+    parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
+
+    full_report = "\n\n---\n\n".join(parts)
+
+    return ReportResponse(
+        project_id=project_id,
+        report_markdown=full_report,
+    )
+
 
 
 
