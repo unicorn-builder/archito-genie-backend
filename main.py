@@ -1099,50 +1099,46 @@ async def export_schematics_svg(project_id: str):
 # HERO IMAGE (WAW) – OpenAI Images (PNG)
 # ============================================================
 @app.get("/projects/{project_id}/schematics/hero")
-async def generate_hero_image(project_id: str):
+async def schematics_hero(project_id: str):
     """
-    Génère une image 'hero' (PNG) à partir des données du projet.
-    Utilise l'API OpenAI Images (gpt-image-1) et renvoie un fichier téléchargeable.
-    """
-
-    # 1) Vérifier qu'on a bien une analyse d'ingénierie
-    if project_id not in ENGINEERING_RESULTS:
-        raise HTTPException(
-            status_code=404,
-            detail="Engineering result not found. Run analysis first."
-        )
-
-    # 2) Clé OpenAI
-    openai_api_key = os.environ.get("OPENAI_API_KEY")
-    if not openai_api_key:
-        raise HTTPException(
-            status_code=500,
-            detail="OPENAI_API_KEY not configured on server"
-        )
-
-    # 3) Prompt pour l'image hero
-    # (simple, neutre, mais déjà 'wow' pour un deck investisseur)
-    prompt = """
-    Create a clean, minimalistic dashboard-style hero illustration for an AI-assisted
-    engineering concept report called "Archito-Genie".
-
-    Requirements:
-    - White background, plenty of whitespace.
-    - Three main vertical panels side by side:
-      1) "Structure"
-      2) "MEPF & Automation"
-      3) "Sustainability"
-    - Each panel contains:
-      - A simple line icon at the top (no text in the icon).
-      - Subtle abstract diagrams and blocks suggesting technical schematics.
-    - Use a modern flat design, soft shadows, rounded corners.
-    - Main accent color: a calm blue suitable for B2B/engineering.
-    - No people, no logos, no text other than the three labels:
-      "Structure", "MEPF & Automation", "Sustainability".
-    - 16:9 composition, centered layout, suitable as a hero for a landing page.
+    Génère une image 'hero' (PNG) à partir des données de projet et du rapport,
+    en appelant l'API OpenAI Images (gpt-image-1).
     """
 
-    # 4) Appel à l’API OpenAI Images
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    project = PROJECTS[project_id]
+    report_data = REPORTS.get(project_id, {})
+    report_text = report_data.get("report_markdown", "")
+
+    # On garde un contexte court pour le prompt image
+    if report_text:
+        context_snippet = report_text[:1200]
+    else:
+        context_snippet = project.get("description", "") or ""
+
+    project_name = project.get("name", "Conceptual Building")
+
+    prompt = f"""
+High-end isometric blueprint hero illustration for an architecture / MEPF / sustainability concept.
+
+- Show a single multi-storey building in 3D.
+- Visually split into three clearly separated zones or layers:
+  1) "Structure"
+  2) "MEPF & Automation"
+  3) "Sustainability"
+- Clean premium tech style, thin blueprint lines, soft gradients.
+- Color palette: deep blue, teal, light grey, white.
+- Minimal text ON image: only the three labels above plus the project title "{project_name}".
+- Background light and simple, with a lot of white space.
+- Composition suitable for a website hero banner or pitch deck cover.
+- No people, no logos, no UI screenshots.
+
+Project context to inspire the scene (DO NOT render this text, just use it for style and mood):
+{context_snippet}
+""".strip()
+
     url = "https://api.openai.com/v1/images/generations"
     headers = {
         "Authorization": f"Bearer {openai_api_key}",
@@ -1151,43 +1147,43 @@ async def generate_hero_image(project_id: str):
     payload = {
         "model": "gpt-image-1",
         "prompt": prompt,
+        # Ta précédente erreur 400 vient très probablement d'une taille invalide.
+        # On utilise ici une taille officiellement supportée et large (hero).
+        "size": "1536x1024",
         "n": 1,
-        "size": "1024x1024",
         "response_format": "b64_json",
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=60)
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
         resp.raise_for_status()
         data = resp.json()
-        # Format attendu: data["data"][0]["b64_json"]
-        image_b64 = data["data"][0]["b64_json"]
     except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI image API error: {e}"
+            detail=f"OpenAI image API error: {e}",
         )
 
-    # 5) Décodage base64 -> bytes
     try:
-        image_bytes = base64.b64decode(image_b64)
-    except Exception:
+        b64_data = data["data"][0]["b64_json"]
+    except Exception as e:
         raise HTTPException(
             status_code=500,
-            detail="Unable to decode image from OpenAI response"
+            detail=f"Unexpected image response format: {e}",
         )
 
-    # 6) Retour en téléchargement PNG
-    buffer = BytesIO(image_bytes)
-    buffer.seek(0)
+    image_bytes = base64.b64decode(b64_data)
+    stream = BytesIO(image_bytes)
+    stream.seek(0)
 
-    filename = f"archito-genie-hero-{project_id}.png"
+    filename = f"{project_id}_hero.png"
 
     return StreamingResponse(
-        buffer,
+        stream,
         media_type="image/png",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
 
 
 
