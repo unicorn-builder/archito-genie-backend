@@ -1102,66 +1102,98 @@ async def export_schematics_svg(project_id: str):
 # HERO IMAGE (PNG) - v1 Images API
 # ============================================================
 @app.get("/projects/{project_id}/schematics/hero")
-async def generate_hero_image(project_id: str):
-    # 1) Vérifier que le projet et les résultats existent
+async def schematics_hero(project_id: str):
+    """
+    Génère une image 'hero' (PNG) à partir des données du projet et
+    des résultats d'ingénierie, en appelant l'API OpenAI Images.
+    """
+
+    # 1) Récupération du projet
     project = PROJECTS.get(project_id)
-    engineering = ENGINEERING_RESULTS.get(project_id)
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    if project is None or engineering is None:
-        raise HTTPException(status_code=404, detail="Project or engineering results not found")
+    # 2) Récupération des résultats d'ingénierie (si dispos)
+    eng_result = ENGINEERING_RESULTS.get(project_id, {})
+    sustainability_summary = eng_result.get("sustainability_summary", "")
+    loads_summary = eng_result.get("loads_summary", "")
+    mepf_summary = eng_result.get("mepf_summary", "")
 
-    # 2) Récupérer des infos de contexte de manière sûre
-    #    (PROJECTS stocke un objet Pydantic, pas un dict)
-    project_name = getattr(project, "name", None) or "Conceptual Building"
-    location = getattr(project, "location", None) or "Dakar, Senegal"
-    levels = getattr(project, "levels", None) or 5
-    building_use = getattr(project, "building_use", None) or "mixed-use residential and commercial"
+    building_name = project.get("name", "Conceptual Building")
+    location = project.get("location", "Unknown location")
+    levels = project.get("levels", 1)
+    typology = project.get("typology", "Mixed-use")
 
-    # On peut aussi aller chercher un petit résumé dans engineering si tu veux
-    sustainability_summary = engineering.get("sustainability_summary", "") if isinstance(engineering, dict) else ""
+    # 3) Construction d'un prompt concis pour l'image
+    context_lines = []
 
-    # 3) Construire le prompt pour gpt-image-1
-    prompt = f"""
-Ultra-clean isometric hero illustration for a SaaS web app called Archito-Genie.
+    context_lines.append(
+        f"Create a clean isometric hero illustration for an architecture & engineering report "
+        f"about a {levels}-storey {typology} building called '{building_name}' in {location}."
+    )
 
-Show a modern {levels}-storey {building_use} project named "{project_name}" in {location},
-with three clearly separated zones labeled:
-- Structure
-- MEPF & Automation
-- Sustainability
+    if sustainability_summary:
+        context_lines.append(
+            f"Highlight sustainability features: {sustainability_summary}"
+        )
+    if loads_summary:
+        context_lines.append(
+            f"Show structural loads or envelopes conceptually: {loads_summary}"
+        )
+    if mepf_summary:
+        context_lines.append(
+            f"Hint at MEPF & automation systems: {mepf_summary}"
+        )
 
-Style: light background, thin vector lines, subtle color palette, tech / product-landing feel,
-no people, no text except the three zone labels, high contrast, very crisp, suitable as a website hero image.
-{sustainability_summary}
-""".strip()
+    context_lines.append(
+        "Style: modern, minimal, professional, soft colors, no text labels, "
+        "no logos, no faces, fits in a 16:9 presentation slide."
+    )
 
-    # 4) Appel API OpenAI Images (v1)
+    prompt = "\n".join(context_lines)
+
+    # 4) Appel OpenAI Images
     url = "https://api.openai.com/v1/images/generations"
+    api_key = os.environ.get("OPENAI_API_KEY", "")
+    if not api_key:
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY is not set in environment"
+        )
+
     headers = {
-        "Authorization": f"Bearer {openai_api_key}",
+        "Authorization": f"Bearer {api_key}",
         "Content-Type": "application/json",
     }
+
     payload = {
         "model": "gpt-image-1",
         "prompt": prompt,
-        "size": "1536x1024",          # format hero
-        "response_format": "b64_json" # on récupère l'image en base64
+        "size": "1536x1024",       # format hero
+        "response_format": "b64_json",
     }
 
     try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp = requests.post(url, headers=headers, json=payload, timeout=120)
         resp.raise_for_status()
-        data = resp.json()
-        b64_data = data["data"][0]["b64_json"]
-    except Exception as e:
+    except Exception:
+        # on renvoie le détail brut pour pouvoir débugger si besoin
         raise HTTPException(
             status_code=500,
-            detail=f"OpenAI image API error: {e}"
+            detail=f"OpenAI image API error: {resp.text if 'resp' in locals() else 'no response'}",
         )
 
-    # 5) Décoder le base64 en PNG
-    import base64
-    png_bytes = base64.b64decode(b64_data)
+    data = resp.json()
+    try:
+        image_b64 = data["data"][0]["b64_json"]
+    except Exception:
+        raise HTTPException(
+            status_code=500,
+            detail="OpenAI image API: unexpected response format",
+        )
+
+    # 5) Décodage base64 -> bytes PNG
+    png_bytes = base64.b64decode(image_b64)
 
     stream = BytesIO()
     stream.write(png_bytes)
@@ -1176,6 +1208,7 @@ no people, no text except the three zone labels, high contrast, very crisp, suit
             "Content-Disposition": f'attachment; filename="{filename}"'
         },
     )
+
 
 
 
