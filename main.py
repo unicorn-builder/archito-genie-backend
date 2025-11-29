@@ -594,141 +594,147 @@ async def analyze_project(project_id: str):
 
 
 @app.get("/projects/{project_id}/report", response_model=ReportResponse)
-async def generate_report(project_id: str):
-    """Generate the full AI report using OpenAI API, with structured sections."""
+async def generate_report(project_id: str) -> ReportResponse:
+    """Generate the full AI report using OpenAI API."""
 
-    # Vérifier que l’analyse existe
+    # 1) Vérifier qu’on a bien un résultat d’ingénierie
     if project_id not in ENGINEERING_RESULTS:
-        raise HTTPException(status_code=404, detail="Engineering result not found. Run analysis first.")
+        raise HTTPException(
+            status_code=404,
+            detail="Engineering result not found. Run analysis first."
+        )
 
-    # 1) Récupérer la clé OpenAI
+    # 2) Clé OpenAI
     openai_api_key = os.environ.get("OPENAI_API_KEY")
     if not openai_api_key:
-        raise HTTPException(status_code=500, detail="OPENAI_API_KEY not configured on server")
+        raise HTTPException(
+            status_code=500,
+            detail="OPENAI_API_KEY not configured on server"
+        )
 
     engineering_result = ENGINEERING_RESULTS[project_id]
     project = PROJECTS[project_id]
 
-    # 2) Préparer les données en JSON (à fournir au modèle)
+    # 3) Sérialiser en JSON pour le prompt
     result_json = json.dumps(engineering_result.dict(), indent=2)
     project_json = json.dumps(project.dict(), indent=2)
 
-    # 3) Construire le prompt : on demande un **JSON strict**
-        prompt = f"""
-    You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
-    
-    You receive two JSON inputs:
-    
-    1) engineering_result_json:
-    {result_json}
-    
-    2) project_json:
-    {project_json}
-    
-    Using ONLY this data, generate all sections of a conceptual design report for this project.
-    
-    You must return a SINGLE JSON object (no extra text, no markdown fences), with exactly these top-level keys:
-    
-    - "narrative_markdown"
-    - "calc_notes_markdown"
-    - "schematics_markdown"
-    - "datasheets_markdown"
-    - "boq_basic_markdown"
-    - "boq_high_end_markdown"
-    - "boq_luxury_markdown"
-    - "structural_spec_markdown"
-    - "mepf_spec_markdown"
-    - "disclaimer_markdown"
-    
-    For each key:
-    
-    - The value must be a **markdown string** representing that section.
-    - Do NOT include any JSON code blocks or ``` fences inside the values.
-    - Make the content technically detailed and consistent with the project data and engineering results.
-    
-    Return ONLY the JSON object, nothing else.
-    """
-        try:
+    # 4) Prompt : on demande un **JSON** structuré
+    # ATTENTION : les {{ }} servent à échapper les accolades dans le f-string
+    prompt = f"""
+You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
 
-        resp = requests.post(url, headers=headers, json=payload, timeout=120)
-    except Exception as e:
-        raise HTTPException(status_code=502, detail=f"Error calling OpenAI API: {e}")
+You receive two JSON objects:
 
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"OpenAI API error {resp.status_code}: {resp.text}")
+1) PROJECT DATA (architectural + context):
+{project_json}
+
+2) ENGINEERING ANALYSIS RESULT (structural, MEPF, sustainability):
+{result_json}
+
+Using ONLY this data and industry best practices, produce ONE valid JSON object with the following fields, all as Markdown strings:
+
+{{
+  "narrative_markdown": "Full design narrative and principles...",
+  "calc_notes_markdown": "Detailed calculation notes (with formulas, assumptions, and typical values)...",
+  "schematics_markdown": "Textual description of schematics and system diagrams (with references to future DWG/RVT)...",
+  "datasheets_markdown": "Summary of key equipment datasheets and performance parameters...",
+  "boq_basic_markdown": "Bill of quantities, BASIC option (tabular Markdown)...",
+  "boq_high_end_markdown": "Bill of quantities, HIGH-END option (tabular Markdown)...",
+  "boq_luxury_markdown": "Bill of quantities, LUXURY option (tabular Markdown)...",
+  "structural_spec_markdown": "Structural design brief and performance specifications...",
+  "mepf_spec_markdown": "MEPF & Automation design brief and performance specifications...",
+  "disclaimer_markdown": "Regulatory disclaimer and professional responsibility notes..."
+}}
+
+Rules:
+- Respond with **valid JSON only**, no extra text.
+- Each field must contain well-structured Markdown, with headings (##, ###), bullet lists and tables where useful.
+- Use realistic but generic values when exact data is missing, and clearly mark assumptions.
+- Aim for professional, client-ready wording.
+"""
+
+    # 5) Appel à l’API OpenAI Responses
+    url = "https://api.openai.com/v1/responses"
+    headers = {
+        "Authorization": f"Bearer {openai_api_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": "gpt-4.1-mini",
+        "input": prompt,
+    }
 
     try:
+        resp = requests.post(url, headers=headers, json=payload, timeout=90)
+        resp.raise_for_status()
         data = resp.json()
-        ai_text = data["output"][0]["content"][0]["text"].strip()
+
+        # Format Responses API:
+        # data["output"][0]["content"][0]["text"]["value"]
+        ai_text = data["output"][0]["content"][0]["text"]["value"]
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Unexpected OpenAI response format: {e}")
+        raise HTTPException(
+            status_code=500,
+            detail=f"OpenAI API error: {e}"
+        )
 
-    # 5) Construire le prompt JSON
-        prompt = f"""
-    You are Archito-Genie, an assistant generating conceptual engineering & sustainability design reports.
-    
-    You receive two JSON blobs:
-    - PROJECT_JSON: description of the building and user constraints.
-    - ENGINEERING_RESULT_JSON: preliminary engineering calculations and sizing.
-    
-    PROJECT_JSON:
-    {project_json}
-    
-    ENGINEERING_RESULT_JSON:
-    {result_json}
-    
-    Using ONLY these data, build ONE JSON object with the following string fields:
-    
-    - "narrative_markdown"
-    - "calc_notes_markdown"
-    - "schematics_markdown"
-    - "datasheets_markdown"
-    - "boq_basic_markdown"
-    - "boq_high_end_markdown"
-    - "boq_luxury_markdown"
-    - "structural_spec_markdown"
-    - "mepf_spec_markdown"
-    - "disclaimer_markdown"
-    
-    Each field must contain a complete, professional markdown section.
-    
-    Rules:
-    - Return ONLY the JSON object (no explanation, no ``` fences, no extra text).
-    - All fields are required and must be non-empty strings.
-    - Use clear headings, bullet points and tables where helpful INSIDE the markdown.
-    """
+    # 6) On essaye de parser le JSON renvoyé par le modèle
+    try:
+        sections = json.loads(ai_text)
 
-
-    # 6) Rapport global (pour compatibilité) = concat des sections
-    full_report = "\n\n".join(
-        part for part in [
-            narrative,
-            "## Calculation Notes\n\n" + calc_notes if calc_notes else "",
-            "## Schematics Description\n\n" + schematics if schematics else "",
-            "## Datasheets (Conceptual)\n\n" + datasheets if datasheets else "",
-            "## Bill of Quantities – Basic\n\n" + boq_basic if boq_basic else "",
-            "## Bill of Quantities – High-End\n\n" + boq_high if boq_high else "",
-            "## Bill of Quantities – Luxury\n\n" + boq_lux if boq_lux else "",
-            "## Structural Design Brief\n\n" + structural_spec if structural_spec else "",
-            "## MEPF Design Brief\n\n" + mepf_spec if mepf_spec else "",
-            "## DISCLAIMER\n\n" + disclaimer if disclaimer else "",
+        required_fields = [
+            "narrative_markdown",
+            "calc_notes_markdown",
+            "schematics_markdown",
+            "datasheets_markdown",
+            "boq_basic_markdown",
+            "boq_high_end_markdown",
+            "boq_luxury_markdown",
+            "structural_spec_markdown",
+            "mepf_spec_markdown",
+            "disclaimer_markdown",
         ]
-        if part
-    )
 
-    return ReportResponse(
-        project_id=project_id,
-        report_markdown=full_report,
-        narrative_markdown=narrative,
-        calc_notes_markdown=calc_notes,
-        schematics_markdown=schematics,
-        datasheets_markdown=datasheets,
-        boq_basic_markdown=boq_basic,
-        boq_high_end_markdown=boq_high,
-        boq_luxury_markdown=boq_lux,
-        structural_spec_markdown=structural_spec,
-        mepf_spec_markdown=mepf_spec,
-    )
+        missing = [f for f in required_fields if f not in sections]
+        if missing:
+            raise HTTPException(
+                status_code=500,
+                detail=f"OpenAI response missing required fields: {missing}"
+            )
+
+        # 7) Pour l’instant, on concatène tout dans un seul `report_markdown`
+        parts = []
+
+        parts.append("## DESIGN NARRATIVE & PRINCIPLES\n\n" + sections["narrative_markdown"])
+        parts.append("## CALCULATION NOTES\n\n" + sections["calc_notes_markdown"])
+        parts.append("## SCHEMATICS OVERVIEW\n\n" + sections["schematics_markdown"])
+        parts.append("## EQUIPMENT DATASHEETS SUMMARY\n\n" + sections["datasheets_markdown"])
+        parts.append("## BILL OF QUANTITIES – BASIC OPTION\n\n" + sections["boq_basic_markdown"])
+        parts.append("## BILL OF QUANTITIES – HIGH-END OPTION\n\n" + sections["boq_high_end_markdown"])
+        parts.append("## BILL OF QUANTITIES – LUXURY OPTION\n\n" + sections["boq_luxury_markdown"])
+        parts.append("## STRUCTURAL DESIGN BRIEF\n\n" + sections["structural_spec_markdown"])
+        parts.append("## MEPF & AUTOMATION DESIGN BRIEF\n\n" + sections["mepf_spec_markdown"])
+        parts.append("## DISCLAIMER\n\n" + sections["disclaimer_markdown"])
+
+        full_report = "\n\n---\n\n".join(parts)
+
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=full_report,
+        )
+
+    except HTTPException:
+        # on relance tel quel si on a déjà construit un message clair
+        raise
+    except Exception:
+        # 8) Fallback : si le modèle n’a pas renvoyé du vrai JSON,
+        # on renvoie le texte brut quand même.
+        return ReportResponse(
+            project_id=project_id,
+            report_markdown=ai_text,
+        )
+
 
 
 
