@@ -22,6 +22,7 @@ Run locally:
 import os
 import uuid
 import json
+import base64  # (on s'en servira pour la version B)
 from datetime import datetime
 from typing import List, Optional
 
@@ -46,6 +47,7 @@ from reportlab.pdfgen import canvas
 # ===========================
 # 📌 FIN DES IMPORTS
 # ===========================
+
 
 
 # ==============================================================================
@@ -1004,6 +1006,93 @@ async def export_pdf(project_id: str):
         buffer,
         media_type="application/pdf",
         headers={"Content-Disposition": f"attachment; filename={filename}"}
+    )
+
+# ============================================
+# SCHEMATICS SVG (Version A – backend only)
+# ============================================
+
+@app.get("/projects/{project_id}/schematics/svg")
+async def export_schematics_svg(project_id: str):
+    """
+    Génère un schéma conceptuel simple (SVG) à partir du projet
+    et du résultat d'analyse technique.
+    """
+
+    # Vérifier que le projet et l'analyse existent
+    if project_id not in PROJECTS or project_id not in ENGINEERING_RESULTS:
+        raise HTTPException(
+            status_code=404,
+            detail="Project or engineering result not found"
+        )
+
+    project = PROJECTS[project_id]
+    engineering_result = ENGINEERING_RESULTS[project_id]
+
+    # On récupère quelques infos de base pour annoter le schéma
+    try:
+        project_dict = project.dict()
+    except Exception:
+        project_dict = {}
+
+    name = project_dict.get("name") or "Conceptual project"
+    location = project_dict.get("location") or ""
+    levels = project_dict.get("levels")
+    levels_label = f"{levels} levels" if levels else "Multi-level"
+
+    # Texte pour les trois blocs (structure, MEPF, sustainability)
+    # On reste volontairement simple pour éviter les bugs.
+    struct_label = "Structure"
+    mepf_label = "MEPF & Automation"
+    sust_label = "Sustainability"
+
+    # Construction du SVG (version simplifiée mais propre)
+    svg_content = f"""<svg xmlns="http://www.w3.org/2000/svg" width="900" height="600">
+  <style>
+    .title {{ font: bold 24px sans-serif; }}
+    .subtitle {{ font: 14px sans-serif; fill: #555; }}
+    .box {{ fill: #f5f5f5; stroke: #333; stroke-width: 2; rx: 12; ry: 12; }}
+    .label {{ font: bold 14px sans-serif; }}
+    .text {{ font: 12px sans-serif; fill: #333; }}
+  </style>
+
+  <!-- Titre -->
+  <text x="40" y="50" class="title">{name}</text>
+  <text x="40" y="80" class="subtitle">{location} – {levels_label}</text>
+  <text x="40" y="110" class="subtitle">Conceptual Systems Overview</text>
+
+  <!-- Bloc Structure -->
+  <rect x="40" y="140" width="820" height="110" class="box" />
+  <text x="60" y="170" class="label">{struct_label}</text>
+  <text x="60" y="195" class="text">Primary frame: columns / beams / slabs designed for gravity & lateral loads.</text>
+  <text x="60" y="215" class="text">Foundation sized for local soil conditions and typical residential loads.</text>
+
+  <!-- Bloc MEPF -->
+  <rect x="40" y="280" width="820" height="110" class="box" />
+  <text x="60" y="310" class="label">{mepf_label}</text>
+  <text x="60" y="335" class="text">HVAC zoning per floor, fresh air & exhaust ducts, main plant room on roof or basement.</text>
+  <text x="60" y="355" class="text">Electrical single line: main LV panel, sub-distribution per floor, critical loads on backup.</text>
+
+  <!-- Bloc Sustainability -->
+  <rect x="40" y="420" width="820" height="110" class="box" />
+  <text x="60" y="450" class="label">{sust_label}</text>
+  <text x="60" y="475" class="text">Envelope optimized for local climate (solar control, shading, natural ventilation).</text>
+  <text x="60" y="495" class="text">Water & energy efficiency measures sized conceptually for early-stage design.</text>
+
+</svg>"""
+
+    # On renvoie le SVG comme fichier téléchargeable
+    from io import BytesIO
+
+    buffer = BytesIO(svg_content.encode("utf-8"))
+    buffer.seek(0)
+
+    filename = f"{project_id}_schematics.svg"
+
+    return StreamingResponse(
+        buffer,
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
     )
 
 
