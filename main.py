@@ -76,7 +76,10 @@ app.mount("/files", StaticFiles(directory="files"), name="files")
 # In-memory storage (replace with database in production)
 PROJECTS: dict = {}
 ENGINEERING_RESULTS: dict = {}
-REPORTS: dict[str, ReportResponse] = {}
+
+# REPORTS stocke un dict de chaînes (toutes les sections markdown)
+REPORTS: dict[str, dict[str, str]] = {}
+
 
 # ==============================================================================
 # PYDANTIC MODELS
