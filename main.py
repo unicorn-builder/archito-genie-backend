@@ -5,6 +5,7 @@ from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from typing import Dict
+from typing import Optional, List
 from openai import OpenAI
 
 # ============================================================================
