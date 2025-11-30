@@ -8,7 +8,7 @@ from typing import Dict, List, Optional
 import boto3
 from botocore.client import Config
 from fastapi import FastAPI, UploadFile, File, HTTPException
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 
@@ -65,7 +65,7 @@ class Project(BaseModel):
 
 # Projets et données associées stockées en mémoire
 PROJECTS: Dict[str, Project] = {}
-PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, svg, hero, etc.
+PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, svg, clés R2, etc.
 
 # ============================================================
 # Helpers R2
@@ -140,13 +140,27 @@ def markdown_to_pdf_bytes(markdown_text: str) -> bytes:
 
 
 # ============================================================
+# Fallback PNG (si OpenAI Images indisponible)
+# ============================================================
+
+# 1x1 px PNG blanc (base64)
+HERO_PLACEHOLDER_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Yp3GxkAAAAASUVORK5CYII="
+)
+
+
+def get_placeholder_png_bytes() -> bytes:
+    return base64.b64decode(HERO_PLACEHOLDER_B64)
+
+
+# ============================================================
 # App FastAPI
 # ============================================================
 
 app = FastAPI(
     title="Archito-Genie Backend",
     description="MVP backend avec stockage Cloudflare R2",
-    version="0.2.0",
+    version="0.2.1",
 )
 
 # ============================================================
@@ -202,7 +216,11 @@ async def upload_project_files(
     # Plan archi
     arch_bytes = await architectural_plan.read()
     arch_key = f"{base_prefix}/architectural_plan_{architectural_plan.filename}"
-    r2_put_bytes(arch_key, arch_bytes, architectural_plan.content_type or "application/pdf")
+    r2_put_bytes(
+        arch_key,
+        arch_bytes,
+        architectural_plan.content_type or "application/pdf",
+    )
 
     # Étude de sol (optionnel)
     soil_key = None
@@ -253,7 +271,6 @@ def analyze_project(project_id: str):
             detail="Architectural plan must be uploaded before analysis",
         )
 
-    # MVP textuel basé sur le nom du projet et le contexte
     prompt = f"""
 Tu es un assistant d'ingénierie pour un SaaS nommé Archito-Genie.
 
@@ -280,7 +297,6 @@ générique mais crédible pour un projet résidentiel ou tertiaire moyen.
     )
 
     report_md = completion.choices[0].message.content or "# Rapport Archito-Genie"
-
     PROJECT_DATA[project_id]["report_markdown"] = report_md
 
     # Génération d'un SVG très simple avec 3 blocs
@@ -341,65 +357,61 @@ def get_schematics_svg(project_id: str):
 @app.get("/projects/{project_id}/schematics/hero")
 async def generate_hero_image(project_id: str):
     """
-    Génère une image 'hero' (PNG) pour le pitch deck, à partir
-    des infos du projet + du rapport Markdown, via l'API OpenAI Images.
+    Génère une image 'hero' (PNG) pour le pitch deck.
+    - Tente d'abord OpenAI Images (gpt-image-1).
+    - Si ça échoue (403 / quota / autre), renvoie un PNG placeholder.
     """
-    # 1) Récupérer le projet
     project = PROJECTS.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # 2) Récupérer le rapport d'analyse pour donner du contexte à l'image
     report_md = PROJECT_DATA[project_id].get("report_markdown") or ""
-    if report_md:
-        snippet = report_md[:1500]
-        context_text = f"Key engineering and architectural notes extracted from the project report:\n{snippet}"
-    else:
-        context_text = (
-            "Modern mixed-use building with clean lines, generous glazing, "
-            "landscaped outdoor areas and high energy performance."
-        )
 
-    building_name = project.name or "New building project"
-    location = "urban coastal city"
+    # Contexte pour l'image (très simple pour le moment)
+    context_text = (
+        report_md[:800]
+        if report_md
+        else "Modern mixed-use building with clean lines, large glazing, and elegant volumetry."
+    )
 
-    # 3) Construire un prompt court pour l'image
     prompt = (
         "Architectural hero image for an investor pitch deck.\n"
-        f"Project name: {building_name}.\n"
-        f"Location: {location}.\n"
+        f"Project name: {project.name}.\n"
         f"{context_text}\n"
         "Style: cinematic 3D render, 16:9 horizontal composition, realistic lighting, "
         "soft daylight, no people, no text, no logo, no title block."
     )
 
-    # 4) Appel OpenAI Images (nouveau SDK)
+    image_bytes: bytes
+
     try:
         img = openai_client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
-            size="1536x1024",  # format hero pour slide
+            size="1536x1024",
             n=1,
-            # pas de response_format -> par défaut b64_json
+            response_format="b64_json",
         )
+
+        if not img.data or img.data[0].b64_json is None:
+            # OpenAI a répondu mais sans image exploitable
+            print("Image generation returned no data, using placeholder.")
+            image_bytes = get_placeholder_png_bytes()
+        else:
+            image_b64 = img.data[0].b64_json
+            image_bytes = base64.b64decode(image_b64)
+
     except Exception as e:
-        # Si jamais OpenAI renvoie une erreur, on la propage proprement
-        raise HTTPException(status_code=502, detail=f"Image generation failed: {e}")
+        # Ici on LOG l'erreur, mais on ne casse plus l'API :
+        # on renvoie un PNG placeholder "propre".
+        print(f"Hero image generation failed, using placeholder instead: {e}")
+        image_bytes = get_placeholder_png_bytes()
 
-    # 5) Récupérer le base64 de manière robuste
-    if not img.data or not getattr(img.data[0], "b64_json", None):
-        raise HTTPException(status_code=500, detail="Image generation returned no data")
+    # Réponse PNG (OpenAI ou placeholder)
+    stream = io.BytesIO()
+    stream.write(image_bytes)
+    stream.seek(0)
 
-    image_b64 = img.data[0].b64_json
-    image_bytes = base64.b64decode(image_b64)
-
-    # 6) Sauvegarder dans R2 pour réutilisation
-    hero_key = f"projects/{project_id}/output/hero.png"
-    r2_put_bytes(hero_key, image_bytes, "image/png")
-    PROJECT_DATA[project_id]["hero_key"] = hero_key
-
-    # 7) Préparer le flux PNG en réponse
-    stream = io.BytesIO(image_bytes)
     filename = f"{project_id}_hero.png"
 
     return StreamingResponse(
