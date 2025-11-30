@@ -130,21 +130,41 @@ async def generate_svg(project_id: str):
 
 
 @app.get("/projects/{project_id}/schematics/hero")
-async def generate_hero_image(project_id: str):
-    """Generate a PNG hero image using OpenAI Image API"""
+async def generate_hero_image(project_id: str) -> bytes:
+    """
+    Génère une image hero (PNG) à partir des résultats d'analyse du projet.
+    Renvoie les bytes du PNG.
+    """
+    # Vérifier si le projet existe
+    if project_id not in REPORTS:
+        raise HTTPException(status_code=404, detail="Project not found")
 
-    prompt = "A clean architectural hero image, minimalist blueprint style"
-    result = client.images.generate(
-        prompt=prompt,
-        size="1024x1024"
-    )
+    eng = REPORTS[project_id]["engineering"]
+    summary_text = eng.sustainability_summary or "No summary available"
 
-    b64 = result.data[0].b64_json
-    image_bytes = base64.b64decode(b64)
+    # Appel OpenAI Images (nouvelle API correcte)
+    try:
+        response = openai.images.generate(
+            model="gpt-image-1",
+            prompt=f"Generate a clean architectural hero image representing: {summary_text}",
+            size="1024x1024",
+            response_format="b64_json"     # OBLIGATOIRE !
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"OpenAI error: {str(e)}")
 
-    return StreamingResponse(
-        BytesIO(image_bytes),
-        media_type="image/png",
-        headers={"Content-Disposition": "attachment; filename=hero.png"}
-    )
+    # Vérification stricte
+    if not response or not response.data:
+        raise HTTPException(status_code=500, detail="Invalid response from OpenAI Images")
 
+    b64 = response.data[0].b64_json
+
+    if not b64:
+        raise HTTPException(status_code=500, detail="OpenAI Images returned no image data")
+
+    try:
+        image_bytes = base64.b64decode(b64)
+    except Exception:
+        raise HTTPException(status_code=500, detail="Failed to decode image data")
+
+    return image_bytes
