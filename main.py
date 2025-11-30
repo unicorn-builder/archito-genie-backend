@@ -340,43 +340,80 @@ def get_schematics_svg(project_id: str):
 
 
 @app.get("/projects/{project_id}/schematics/hero")
-def generate_hero_image(project_id: str):
-    if project_id not in PROJECTS:
+async def generate_hero_image(project_id: str):
+    """
+    Génère une image 'hero' (PNG) pour le pitch deck, à partir
+    des infos du projet + des résumés d'analyse, via l'API OpenAI Images.
+    """
+    # 1) Récupérer le projet
+    project = PROJECTS.get(project_id)
+    if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    project = PROJECTS[project_id]
-    report_md = PROJECT_DATA[project_id].get("report_markdown") or ""
+    # 2) Récupérer les résumés d'analyse, mais de manière SÉCURISÉE
+    analysis = REPORTS.get(project_id, {})
 
-    # Prompt hero simplifié mais efficace
-    hero_prompt = f"""
-Create a clean isometric hero illustration of a modern building dashboard
-for a SaaS called Archito-Genie.
+    building_name = project.get("name", "New building project")
+    location = project.get("location", "urban coastal city")
 
-The UI should show three main cards:
-- Structure
-- MEPF & Automation
-- Sustainability
+    key_points: list[str] = []
 
-Include subtle charts and metrics, no real text except short labels.
-Style: light background, soft shadows, professional, suitable for an investor deck.
-Project name: {project.name}.
-"""
+    arch = analysis.get("architecture_summary") or analysis.get("architecture")
+    if arch:
+        key_points.append(f"Architecture: {arch[:400]}")
 
-    img_response = openai_client.images.generate(
-        model="gpt-image-1",
-        prompt=hero_prompt,
-        size="1536x1024",
-        response_format="b64_json",
+    eng = analysis.get("engineering_summary") or analysis.get("engineering")
+    if eng:
+        key_points.append(f"Structure & MEP: {eng[:400]}")
+
+    sustain = analysis.get("sustainability_summary") or analysis.get("sustainability")
+    if sustain:
+        key_points.append(f"Sustainability: {sustain[:400]}")
+
+    # Si jamais on n'a rien, on met un texte par défaut
+    context_text = (
+        "\n".join(key_points)
+        if key_points
+        else "Modern mixed-use building with clean lines, large glazing, and elegant volumetry."
     )
 
-    b64_data = img_response.data[0].b64_json
-    image_bytes = base64.b64decode(b64_data)
+    # 3) Construire un prompt court pour l'image
+    prompt = (
+        "Architectural hero image for an investor pitch deck.\n"
+        f"Project name: {building_name}.\n"
+        f"Location: {location}.\n"
+        f"{context_text}\n"
+        "Style: cinematic 3D render, 16:9 horizontal composition, realistic lighting, "
+        "soft daylight, no people, no text, no logo, no title block."
+    )
 
-    key = f"projects/{project_id}/output/hero.png"
-    r2_put_bytes(key, image_bytes, "image/png")
-    PROJECT_DATA[project_id]["hero_key"] = key
+    # 4) Appel OpenAI Images (nouveau SDK)
+    client = OpenAI()
 
-    stream = io.BytesIO(image_bytes)
+    try:
+        img = client.images.generate(
+            model="gpt-image-1",
+            prompt=prompt,
+            size="1536x1024",        # format hero pour slide
+            n=1,
+            response_format="b64_json",
+        )
+    except Exception as e:
+        # Si jamais OpenAI renvoie une erreur, on la propage proprement
+        raise HTTPException(status_code=502, detail=f"Image generation failed: {e}")
+
+    # 5) Récupérer le base64 de manière robuste
+    if not img.data or img.data[0].b64_json is None:
+        raise HTTPException(status_code=500, detail="Image generation returned no data")
+
+    image_b64 = img.data[0].b64_json
+    image_bytes = base64.b64decode(image_b64)
+
+    # 6) Préparer le flux PNG en réponse
+    stream = BytesIO()
+    stream.write(image_bytes)
+    stream.seek(0)
+
     filename = f"{project_id}_hero.png"
 
     return StreamingResponse(
@@ -384,6 +421,7 @@ Project name: {project.name}.
         media_type="image/png",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
 
 
 # ============================================================
