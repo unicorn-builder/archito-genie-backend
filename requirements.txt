@@ -7,3 +7,4 @@ httpx==0.27.0
 requests
 python-docx
 reportlab
+boto3
