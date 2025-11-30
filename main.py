@@ -46,7 +46,14 @@ def create_project(req: CreateProjectRequest):
 
 
 @app.post("/projects/{project_id}/files")
-async def upload_file(project_id: str, file: UploadFile = File(...)):
+async def upload_project_files(
+    project_id: str,
+    architectural_plan: UploadFile = File(...),
+    soil_report: Optional[UploadFile] = File(None),
+    additional_files: Optional[List[UploadFile]] = File(None),
+):
+    ...
+
     if project_id not in PROJECTS:
         raise HTTPException(404, "Unknown project_id")
 
