@@ -67,6 +67,9 @@ class Project(BaseModel):
 PROJECTS: Dict[str, Project] = {}
 PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, svg, hero, etc.
 
+# Résultats d'analyse pour le hero PNG
+REPORTS: Dict[str, Dict] = {}
+
 # ============================================================
 # Helpers R2
 # ============================================================
@@ -284,6 +287,13 @@ générique mais crédible pour un projet résidentiel ou tertiaire moyen.
 
     PROJECT_DATA[project_id]["report_markdown"] = report_md
 
+    # On stocke aussi un résumé "générique" dans REPORTS pour le hero PNG
+    REPORTS[project_id] = {
+        "architecture_summary": report_md,
+        "engineering": report_md,
+        "sustainability_summary": report_md,
+    }
+
     # Génération d'un SVG très simple avec 3 blocs
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300">
   <style>
@@ -335,7 +345,7 @@ def get_schematics_svg(project_id: str):
     return StreamingResponse(
         stream,
         media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
 
 
@@ -350,13 +360,18 @@ async def generate_hero_image(project_id: str):
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # 2) Récupérer les résumés d'analyse, mais de manière SÉCURISÉE
-    analysis = REPORTS.get(project_id, {})
+    # 2) Récupérer les résumés d'analyse
+    analysis = REPORTS.get(project_id)
+    if not analysis:
+        raise HTTPException(
+            status_code=404,
+            detail="No analysis found for this project. Run /projects/{id}/analyze first.",
+        )
 
-    building_name = project.get("name", "New building project")
-    location = project.get("location", "urban coastal city")
+    building_name = project.name
+    location = "modern urban coastal city"
 
-    key_points: list[str] = []
+    key_points: List[str] = []
 
     arch = analysis.get("architecture_summary") or analysis.get("architecture")
     if arch:
@@ -387,14 +402,12 @@ async def generate_hero_image(project_id: str):
         "soft daylight, no people, no text, no logo, no title block."
     )
 
-    # 4) Appel OpenAI Images (nouveau SDK)
-    client = OpenAI()
-
+    # 4) Appel OpenAI Images
     try:
-        img = client.images.generate(
+        img = openai_client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
-            size="1536x1024",        # format hero pour slide
+            size="1536x1024",  # format hero pour slide
             n=1,
             response_format="b64_json",
         )
@@ -410,7 +423,7 @@ async def generate_hero_image(project_id: str):
     image_bytes = base64.b64decode(image_b64)
 
     # 6) Préparer le flux PNG en réponse
-    stream = BytesIO()
+    stream = io.BytesIO()
     stream.write(image_bytes)
     stream.seek(0)
 
@@ -419,9 +432,8 @@ async def generate_hero_image(project_id: str):
     return StreamingResponse(
         stream,
         media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
-
 
 
 # ============================================================
@@ -449,7 +461,7 @@ def export_report_pdf(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
 
 
@@ -464,7 +476,11 @@ def export_report_docx(project_id: str):
 
     docx_bytes = markdown_to_docx_bytes(report_md)
     key = f"projects/{project_id}/output/report.docx"
-    r2_put_bytes(key, docx_bytes, "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    r2_put_bytes(
+        key,
+        docx_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
     PROJECT_DATA[project_id]["report_docx_key"] = key
 
     stream = io.BytesIO(docx_bytes)
@@ -473,7 +489,7 @@ def export_report_docx(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
     )
 
 
