@@ -16,7 +16,7 @@ from openai import OpenAI
 # Config OpenAI
 # ============================================================
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("OPENAI_API_KEY".lower())
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY") or os.getenv("openai_api_key")
 if not OPENAI_API_KEY:
     raise RuntimeError("OPENAI_API_KEY manquant dans les variables d'environnement")
 
@@ -66,9 +66,6 @@ class Project(BaseModel):
 # Projets et données associées stockées en mémoire
 PROJECTS: Dict[str, Project] = {}
 PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, svg, hero, etc.
-
-# Résultats d'analyse pour le hero PNG
-REPORTS: Dict[str, Dict] = {}
 
 # ============================================================
 # Helpers R2
@@ -256,8 +253,7 @@ def analyze_project(project_id: str):
             detail="Architectural plan must be uploaded before analysis",
         )
 
-    # On ne lit pas vraiment le PDF pour l’instant : MVP textuel
-    # On se sert juste du nom du fichier et du contexte projet.
+    # MVP textuel basé sur le nom du projet et le contexte
     prompt = f"""
 Tu es un assistant d'ingénierie pour un SaaS nommé Archito-Genie.
 
@@ -286,13 +282,6 @@ générique mais crédible pour un projet résidentiel ou tertiaire moyen.
     report_md = completion.choices[0].message.content or "# Rapport Archito-Genie"
 
     PROJECT_DATA[project_id]["report_markdown"] = report_md
-
-    # On stocke aussi un résumé "générique" dans REPORTS pour le hero PNG
-    REPORTS[project_id] = {
-        "architecture_summary": report_md,
-        "engineering": report_md,
-        "sustainability_summary": report_md,
-    }
 
     # Génération d'un SVG très simple avec 3 blocs
     svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="900" height="300">
@@ -345,7 +334,7 @@ def get_schematics_svg(project_id: str):
     return StreamingResponse(
         stream,
         media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -353,44 +342,26 @@ def get_schematics_svg(project_id: str):
 async def generate_hero_image(project_id: str):
     """
     Génère une image 'hero' (PNG) pour le pitch deck, à partir
-    des infos du projet + des résumés d'analyse, via l'API OpenAI Images.
+    des infos du projet + du rapport Markdown, via l'API OpenAI Images.
     """
     # 1) Récupérer le projet
     project = PROJECTS.get(project_id)
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    # 2) Récupérer les résumés d'analyse
-    analysis = REPORTS.get(project_id)
-    if not analysis:
-        raise HTTPException(
-            status_code=404,
-            detail="No analysis found for this project. Run /projects/{id}/analyze first.",
+    # 2) Récupérer le rapport d'analyse pour donner du contexte à l'image
+    report_md = PROJECT_DATA[project_id].get("report_markdown") or ""
+    if report_md:
+        snippet = report_md[:1500]
+        context_text = f"Key engineering and architectural notes extracted from the project report:\n{snippet}"
+    else:
+        context_text = (
+            "Modern mixed-use building with clean lines, generous glazing, "
+            "landscaped outdoor areas and high energy performance."
         )
 
-    building_name = project.name
-    location = "modern urban coastal city"
-
-    key_points: List[str] = []
-
-    arch = analysis.get("architecture_summary") or analysis.get("architecture")
-    if arch:
-        key_points.append(f"Architecture: {arch[:400]}")
-
-    eng = analysis.get("engineering_summary") or analysis.get("engineering")
-    if eng:
-        key_points.append(f"Structure & MEP: {eng[:400]}")
-
-    sustain = analysis.get("sustainability_summary") or analysis.get("sustainability")
-    if sustain:
-        key_points.append(f"Sustainability: {sustain[:400]}")
-
-    # Si jamais on n'a rien, on met un texte par défaut
-    context_text = (
-        "\n".join(key_points)
-        if key_points
-        else "Modern mixed-use building with clean lines, large glazing, and elegant volumetry."
-    )
+    building_name = project.name or "New building project"
+    location = "urban coastal city"
 
     # 3) Construire un prompt court pour l'image
     prompt = (
@@ -402,37 +373,39 @@ async def generate_hero_image(project_id: str):
         "soft daylight, no people, no text, no logo, no title block."
     )
 
-    # 4) Appel OpenAI Images
+    # 4) Appel OpenAI Images (nouveau SDK)
     try:
         img = openai_client.images.generate(
             model="gpt-image-1",
             prompt=prompt,
             size="1536x1024",  # format hero pour slide
             n=1,
-            response_format="b64_json",
+            # pas de response_format -> par défaut b64_json
         )
     except Exception as e:
         # Si jamais OpenAI renvoie une erreur, on la propage proprement
         raise HTTPException(status_code=502, detail=f"Image generation failed: {e}")
 
     # 5) Récupérer le base64 de manière robuste
-    if not img.data or img.data[0].b64_json is None:
+    if not img.data or not getattr(img.data[0], "b64_json", None):
         raise HTTPException(status_code=500, detail="Image generation returned no data")
 
     image_b64 = img.data[0].b64_json
     image_bytes = base64.b64decode(image_b64)
 
-    # 6) Préparer le flux PNG en réponse
-    stream = io.BytesIO()
-    stream.write(image_bytes)
-    stream.seek(0)
+    # 6) Sauvegarder dans R2 pour réutilisation
+    hero_key = f"projects/{project_id}/output/hero.png"
+    r2_put_bytes(hero_key, image_bytes, "image/png")
+    PROJECT_DATA[project_id]["hero_key"] = hero_key
 
+    # 7) Préparer le flux PNG en réponse
+    stream = io.BytesIO(image_bytes)
     filename = f"{project_id}_hero.png"
 
     return StreamingResponse(
         stream,
         media_type="image/png",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -461,7 +434,7 @@ def export_report_pdf(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -489,7 +462,7 @@ def export_report_docx(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
