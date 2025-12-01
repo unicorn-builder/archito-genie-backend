@@ -8,3 +8,6 @@ requests
 python-docx
 reportlab
 boto3
+svgwrite
+cairosvg
+ezdxf
