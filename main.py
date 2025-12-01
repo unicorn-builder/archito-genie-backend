@@ -20,10 +20,14 @@ from reportlab.pdfgen import canvas
 import svgwrite
 
 # Imports optionnels pour PDF/CAD à partir des SVG/plan_spec
+# Conversion SVG -> PDF (optionnelle)
 try:
     import cairosvg  # pour SVG -> PDF
-except ImportError:
+except Exception:
+    # Sur certains serveurs (comme Render), les librairies système "cairo"
+    # ne sont pas disponibles. Dans ce cas, on désactive juste la fonction.
     cairosvg = None
+
 
 try:
     import ezdxf  # pour générer des DXF (CAD)
