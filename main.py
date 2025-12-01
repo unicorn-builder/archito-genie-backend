@@ -3,12 +3,14 @@ import uuid
 import io
 import json
 import math
+import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.client import Config
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import requests
+from fastapi import FastAPI, UploadFile, File, HTTPException, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
@@ -65,6 +67,138 @@ s3_client = boto3.client(
     region_name=R2_REGION,
     config=Config(signature_version="s3v4"),
 )
+
+
+# ============================================================
+# Config Autodesk Platform Services (APS / Forge)
+# ============================================================
+
+APS_CLIENT_ID = os.getenv("APS_CLIENT_ID")
+APS_CLIENT_SECRET = os.getenv("APS_CLIENT_SECRET")
+APS_BUCKET_KEY = os.getenv("APS_BUCKET_KEY")  # doit être lowercase, sans espaces
+APS_REGION = os.getenv("APS_REGION") or "US"
+
+APS_ENABLED = bool(APS_CLIENT_ID and APS_CLIENT_SECRET and APS_BUCKET_KEY)
+
+APS_AUTH_URL = "https://developer.api.autodesk.com/authentication/v2/token"
+APS_OSS_BASE = "https://developer.api.autodesk.com/oss/v2"
+APS_MD_BASE = "https://developer.api.autodesk.com/modelderivative/v2"
+
+
+def _require_aps():
+    if not APS_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="APS (Forge) n'est pas configuré. Définis APS_CLIENT_ID, APS_CLIENT_SECRET et APS_BUCKET_KEY.",
+        )
+
+
+def get_aps_token(scopes: Optional[List[str]] = None) -> Dict[str, Any]:
+    """
+    Récupère un token 2-legged APS.
+    On renvoie le JSON complet { access_token, token_type, expires_in, ... }.
+    """
+    if scopes is None:
+        scopes = [
+            "data:read",
+            "data:write",
+            "data:create",
+            "bucket:read",
+            "bucket:create",
+            "viewables:read",
+        ]
+
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": APS_CLIENT_ID,
+        "client_secret": APS_CLIENT_SECRET,
+        "scope": " ".join(scopes),
+    }
+    resp = requests.post(APS_AUTH_URL, data=data)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS auth failed: {resp.status_code} {resp.text}",
+        )
+    return resp.json()
+
+
+def ensure_aps_bucket(token: str) -> None:
+    bucket_key = APS_BUCKET_KEY.lower()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "bucketKey": bucket_key,
+        "policyKey": "persistent",
+    }
+    resp = requests.post(f"{APS_OSS_BASE}/buckets", headers=headers, json=payload)
+    if resp.status_code in (200, 201, 409):
+        # 200/201 = créé, 409 = existe déjà → OK
+        return
+    raise HTTPException(
+        status_code=500,
+        detail=f"APS bucket creation failed: {resp.status_code} {resp.text}",
+    )
+
+
+def upload_to_aps(token: str, object_name: str, data: bytes, content_type: str = "application/octet-stream") -> Dict[str, Any]:
+    """
+    Upload un fichier (DXF par ex.) dans le bucket APS.
+    Renvoie le JSON { bucketKey, objectId, objectKey, size, ... }.
+    """
+    bucket_key = APS_BUCKET_KEY.lower()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": content_type,
+    }
+    # On évite les caractères exotiques dans le nom
+    safe_object_name = object_name.replace(" ", "_")
+    url = f"{APS_OSS_BASE}/buckets/{bucket_key}/objects/{safe_object_name}"
+    resp = requests.put(url, headers=headers, data=data)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS upload failed: {resp.status_code} {resp.text}",
+        )
+    return resp.json()
+
+
+def start_aps_translation(token: str, object_id: str, output_format: str = "svf2") -> Dict[str, Any]:
+    """
+    Lance un job de traduction Model Derivative (DXF → SVF2 pour viewer).
+    object_id vient de la réponse OSS (champ 'objectId').
+    """
+    urn_bytes = object_id.encode("utf-8")
+    urn_b64 = base64.b64encode(urn_bytes).decode("utf-8").rstrip("=")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    job = {
+        "input": {
+            "urn": urn_b64,
+        },
+        "output": {
+            "formats": [
+                {
+                    "type": output_format,
+                    "views": ["2d", "3d"],
+                }
+            ]
+        },
+    }
+    resp = requests.post(f"{APS_MD_BASE}/designdata/job", headers=headers, json=job)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS translation job failed: {resp.status_code} {resp.text}",
+        )
+    result = resp.json()
+    result["urn"] = urn_b64
+    return result
 
 
 # ============================================================
@@ -176,9 +310,9 @@ app = FastAPI(
     title="Archito-Genie Backend",
     description=(
         "MVP Archito-Genie : plans STRUCTURE / MEP (SVG, PDF, DXF) + BOQ + datasheets + "
-        "option EDGE (sans APS pour l'instant)."
+        "option EDGE + intégration APS (OSS + Model Derivative)."
     ),
-    version="0.7.0",
+    version="0.8.0",
 )
 
 
@@ -1134,6 +1268,10 @@ def create_project(payload: ProjectCreate):
         "datasheets": None,
         "report_pdf_key": None,
         "report_docx_key": None,
+        "aps": {
+            "structure": None,  # {"object_id":..., "urn":...}
+            "mep": None,
+        },
     }
     return project
 
@@ -1309,7 +1447,7 @@ def get_structure_svg_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1328,7 +1466,7 @@ def get_mep_svg_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1354,7 +1492,7 @@ def get_structure_pdf_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1374,7 +1512,7 @@ def get_mep_pdf_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1394,7 +1532,7 @@ def get_structure_dxf_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/dxf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1414,7 +1552,7 @@ def get_mep_dxf_route(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/dxf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1512,7 +1650,7 @@ def export_report_pdf(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
 
@@ -1540,8 +1678,129 @@ def export_report_docx(project_id: str):
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": f'attachment; filename=\"{filename}\"'},
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ============================================================
+# APS endpoints (status, token, publication plans)
+# ============================================================
+
+@app.get("/aps/status")
+def aps_status():
+    """
+    Permet au front ou à toi de vérifier rapidement si APS est configuré côté backend.
+    """
+    return {
+        "enabled": APS_ENABLED,
+        "bucket_key": APS_BUCKET_KEY.lower() if APS_BUCKET_KEY else None,
+        "region": APS_REGION,
+    }
+
+
+@app.get("/aps/token")
+def aps_token():
+    """
+    Fournit un token 2-legged APS que le frontend peut utiliser pour le viewer.
+    (Pour un vrai produit en prod, tu pourras filtrer les scopes / faire un proxy.)
+    """
+    _require_aps()
+    token_json = get_aps_token()
+    return token_json
+
+
+@app.post("/projects/{project_id}/publish/aps")
+def publish_plan_to_aps(
+    project_id: str,
+    kind: str = Query(..., regex="^(structure|mep)$", description="structure ou mep"),
+):
+    """
+    Publie le plan STRUCTURE ou MEP en DXF vers APS et lance la traduction.
+    - kind=structure → structure.dxf
+    - kind=mep       → mep.dxf
+
+    Stocke dans PROJECT_DATA[project_id]["aps"][kind] :
+    {
+      "object_id": "...",
+      "urn": "..."
+    }
+    """
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    _require_aps()
+
+    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
+    if not plan_spec:
+        raise HTTPException(
+            status_code=400,
+            detail="plan_spec not available. Call /projects/{project_id}/analyze first.",
+        )
+
+    # Génération DXF en mémoire
+    if kind == "structure":
+        dxf_bytes = render_structure_dxf(plan_spec)
+        object_name = f"{project_id}_structure.dxf"
+    else:
+        dxf_bytes = render_mep_dxf(plan_spec)
+        object_name = f"{project_id}_mep.dxf"
+
+    # 1) Token APS + bucket
+    token_json = get_aps_token()
+    access_token = token_json["access_token"]
+    ensure_aps_bucket(access_token)
+
+    # 2) Upload DXF dans OSS
+    upload_info = upload_to_aps(
+        token=access_token,
+        object_name=object_name,
+        data=dxf_bytes,
+        content_type="application/dxf",
+    )
+    object_id = upload_info.get("objectId")
+    if not object_id:
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS upload did not return objectId: {upload_info}",
+        )
+
+    # 3) Lancer la traduction Model Derivative
+    job_result = start_aps_translation(access_token, object_id=object_id)
+    urn = job_result.get("urn")
+
+    # 4) Stocker l'URN côté projet
+    if "aps" not in PROJECT_DATA[project_id]:
+        PROJECT_DATA[project_id]["aps"] = {"structure": None, "mep": None}
+
+    PROJECT_DATA[project_id]["aps"][kind] = {
+        "object_id": object_id,
+        "urn": urn,
+        "job": job_result,
+    }
+
+    return {
+        "project_id": project_id,
+        "kind": kind,
+        "aps_bucket": APS_BUCKET_KEY.lower() if APS_BUCKET_KEY else None,
+        "object_id": object_id,
+        "urn": urn,
+        "job": job_result,
+    }
+
+
+@app.get("/projects/{project_id}/aps")
+def get_project_aps_info(project_id: str):
+    """
+    Renvoie les infos APS (URN) pour STRUCTURE & MEP pour brancher le viewer côté front.
+    """
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+    aps_info = PROJECT_DATA[project_id].get("aps") or {}
+    return {
+        "project_id": project_id,
+        "aps": aps_info,
+        "region": APS_REGION,
+    }
 
 
 # ============================================================
@@ -1552,5 +1811,6 @@ def export_report_docx(project_id: str):
 def healthcheck():
     return {
         "status": "ok",
-        "message": "Archito-Genie backend MVP (plans SVG/PDF/DXF + BOQ + datasheets + EDGE) is live",
+        "message": "Archito-Genie backend (plans SVG/PDF/DXF + BOQ + datasheets + EDGE + APS) is live",
+        "aps_enabled": APS_ENABLED,
     }
