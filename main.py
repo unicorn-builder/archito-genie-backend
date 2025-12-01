@@ -11,6 +11,7 @@ from botocore.client import Config
 from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from docx import Document  # python-docx
 from reportlab.lib.pagesizes import letter
@@ -154,6 +155,15 @@ app = FastAPI(
         "BOQ multi-variantes + Datasheets + EDGE, à partir d'un plan archi."
     ),
     version="0.9.0",
+)
+
+# CORS pour permettre au frontend (Lovable) d'appeler le backend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # plus tard tu pourras mettre l'URL précise de ton front
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 
