@@ -15,24 +15,17 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 from docx import Document  # python-docx
-from reportlab.lib.pagesizes import letter
+from reportlab.lib.pagesizes import letter, A3, landscape
 from reportlab.pdfgen import canvas
 import svgwrite
 
-# Imports optionnels pour PDF/CAD à partir des SVG/plan_spec
-# Conversion SVG -> PDF (optionnelle)
-try:
-    import cairosvg  # pour SVG -> PDF
-except Exception:
-    # Sur certains serveurs (comme Render), les librairies système "cairo"
-    # ne sont pas disponibles. Dans ce cas, on désactive juste la fonction.
-    cairosvg = None
-
-
+# Imports optionnels pour CAD
 try:
     import ezdxf  # pour générer des DXF (CAD)
 except ImportError:
     ezdxf = None
+
+# (on n'utilise plus cairosvg pour les plans, seulement reportlab)
 
 
 # ============================================================
@@ -98,10 +91,6 @@ def _require_aps():
 
 
 def get_aps_token(scopes: Optional[List[str]] = None) -> Dict[str, Any]:
-    """
-    Récupère un token 2-legged APS.
-    On renvoie le JSON complet { access_token, token_type, expires_in, ... }.
-    """
     if scopes is None:
         scopes = [
             "data:read",
@@ -139,7 +128,6 @@ def ensure_aps_bucket(token: str) -> None:
     }
     resp = requests.post(f"{APS_OSS_BASE}/buckets", headers=headers, json=payload)
     if resp.status_code in (200, 201, 409):
-        # 200/201 = créé, 409 = existe déjà → OK
         return
     raise HTTPException(
         status_code=500,
@@ -148,16 +136,11 @@ def ensure_aps_bucket(token: str) -> None:
 
 
 def upload_to_aps(token: str, object_name: str, data: bytes, content_type: str = "application/octet-stream") -> Dict[str, Any]:
-    """
-    Upload un fichier (DXF par ex.) dans le bucket APS.
-    Renvoie le JSON { bucketKey, objectId, objectKey, size, ... }.
-    """
     bucket_key = APS_BUCKET_KEY.lower()
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": content_type,
     }
-    # On évite les caractères exotiques dans le nom
     safe_object_name = object_name.replace(" ", "_")
     url = f"{APS_OSS_BASE}/buckets/{bucket_key}/objects/{safe_object_name}"
     resp = requests.put(url, headers=headers, data=data)
@@ -170,10 +153,6 @@ def upload_to_aps(token: str, object_name: str, data: bytes, content_type: str =
 
 
 def start_aps_translation(token: str, object_id: str, output_format: str = "svf2") -> Dict[str, Any]:
-    """
-    Lance un job de traduction Model Derivative (DXF → SVF2 pour viewer).
-    object_id vient de la réponse OSS (champ 'objectId').
-    """
     urn_bytes = object_id.encode("utf-8")
     urn_b64 = base64.b64encode(urn_bytes).decode("utf-8").rstrip("=")
 
@@ -182,9 +161,7 @@ def start_aps_translation(token: str, object_id: str, output_format: str = "svf2
         "Content-Type": "application/json",
     }
     job = {
-        "input": {
-            "urn": urn_b64,
-        },
+        "input": {"urn": urn_b64},
         "output": {
             "formats": [
                 {
@@ -289,24 +266,6 @@ def markdown_to_pdf_bytes(markdown_text: str) -> bytes:
 
 
 # ============================================================
-# Conversion SVG -> PDF
-# ============================================================
-
-def svg_to_pdf_bytes(svg_str: str) -> bytes:
-    """
-    Convertit un SVG (string) en PDF vectoriel.
-    Nécessite la librairie cairosvg.
-    """
-    if cairosvg is None:
-        raise HTTPException(
-            status_code=500,
-            detail="La conversion SVG->PDF nécessite 'cairosvg'. Ajoute-le à requirements.txt."
-        )
-    pdf_bytes = cairosvg.svg2pdf(bytestring=svg_str.encode("utf-8"))
-    return pdf_bytes
-
-
-# ============================================================
 # App FastAPI
 # ============================================================
 
@@ -325,9 +284,6 @@ app = FastAPI(
 # ============================================================
 
 def _layout_rooms(rooms: List[Dict[str, Any]], scale: float = 40.0):
-    """
-    Organise les pièces en grille simple pour un rendu MVP lisible.
-    """
     max_rooms_per_row = max(1, math.ceil(math.sqrt(len(rooms)))) if rooms else 1
     current_x = 0.0
     current_y = 0.0
@@ -390,7 +346,6 @@ def render_structure_svg(spec: Dict[str, Any]) -> str:
         h = p["l_m"] * scale
         room = p["room"]
 
-        # Contour de la pièce
         dwg.add(
             dwg.rect(
                 insert=(x, y),
@@ -400,7 +355,6 @@ def render_structure_svg(spec: Dict[str, Any]) -> str:
                 stroke_width=3,
             )
         )
-        # Nom de la pièce
         dwg.add(
             dwg.text(
                 room.get("name", "Pièce"),
@@ -412,7 +366,6 @@ def render_structure_svg(spec: Dict[str, Any]) -> str:
             )
         )
 
-        # Poteaux aux 4 coins
         col_size = 12
         for dx, dy in [(0, 0), (w - col_size, 0), (0, h - col_size), (w - col_size, h - col_size)]:
             dwg.add(
@@ -423,15 +376,6 @@ def render_structure_svg(spec: Dict[str, Any]) -> str:
                 )
             )
 
-    # Trame indicative horizontale
-    dwg.add(
-        dwg.text(
-            "Trame indicative (m)",
-            insert=(margin, height_px - 40),
-            font_size="10px",
-            font_family="Arial",
-        )
-    )
     start_x = margin
     end_x = margin + total_w_m * scale
     base_y = height_px - 20
@@ -483,7 +427,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Contours & noms
     for p in layout_positions:
         x = margin + p["x_m"] * scale
         y = margin + p["y_m"] * scale
@@ -512,7 +455,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
             )
         )
 
-    # Noyau technique simplifié
     core_x = margin + total_w_m * scale + 20
     core_y = margin
     core_w = 80
@@ -539,7 +481,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Colonne EU/EV (plomberie)
     dwg.add(
         dwg.line(
             start=(core_x + core_w / 2, core_y + 20),
@@ -558,7 +499,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Tableau électrique (courant fort)
     dwg.add(
         dwg.rect(
             insert=(core_x + 10, core_y + 30),
@@ -579,7 +519,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Baie courant faible (VDI / data)
     dwg.add(
         dwg.rect(
             insert=(core_x + 10, core_y + 70),
@@ -600,7 +539,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Réseaux dans les pièces
     for p in layout_positions:
         x = margin + p["x_m"] * scale
         y = margin + p["y_m"] * scale
@@ -611,9 +549,7 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         name = (room.get("name") or "").lower()
         is_wet = room.get("is_wet_area", False)
 
-        # Plomberie (sanitaires / points d'eau)
         if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
-            # Point d'eau
             dwg.add(
                 dwg.circle(
                     center=(x + w * 0.2, y + h * 0.2),
@@ -632,7 +568,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
                     fill="#0077ff",
                 )
             )
-            # Evacuation
             dwg.add(
                 dwg.polygon(
                     points=[
@@ -646,7 +581,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
                 )
             )
 
-        # Courant fort : prise
         dwg.add(
             dwg.rect(
                 insert=(x + 5, y + 5),
@@ -666,7 +600,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
             )
         )
 
-        # Courant faible : prise RJ45 / data
         dwg.add(
             dwg.rect(
                 insert=(x + 5, y + 22),
@@ -686,7 +619,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
             )
         )
 
-        # Luminaire
         lum_x = x + w / 2
         lum_y = y + h / 2
         dwg.add(
@@ -706,7 +638,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
             )
         )
 
-    # Légende
     legend_x = margin
     legend_y = height_px - 130
     legend_w = 360
@@ -731,7 +662,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Plomberie
     dwg.add(
         dwg.circle(
             center=(legend_x + 15, legend_y + 35),
@@ -771,7 +701,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Courant fort
     dwg.add(
         dwg.rect(
             insert=(legend_x + 10, legend_y + 70),
@@ -790,7 +719,6 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
         )
     )
 
-    # Courant faible
     dwg.add(
         dwg.rect(
             insert=(legend_x + 10, legend_y + 90),
@@ -813,16 +741,150 @@ def render_mep_svg(spec: Dict[str, Any]) -> str:
 
 
 # ============================================================
+# PDF plans STRUCTURE & MEP (sans cairosvg, avec reportlab)
+# ============================================================
+
+def render_structure_pdf_bytes(plan_spec: Dict[str, Any]) -> bytes:
+    buf = io.BytesIO()
+    page_size = landscape(A3)
+    c = canvas.Canvas(buf, pagesize=page_size)
+    width, height = page_size
+    margin = 40
+
+    floors = plan_spec.get("floors", [])
+    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
+    rooms = floor.get("rooms", [])
+
+    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
+
+    if total_w_m <= 0:
+        total_w_m = 8.0
+    if total_h_m <= 0:
+        total_h_m = 8.0
+
+    max_width_pts = width - 2 * margin
+    max_height_pts = height - 2 * margin
+    scale_x = max_width_pts / total_w_m
+    scale_y = max_height_pts / total_h_m
+    scale = min(scale_x, scale_y)
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(margin, height - margin + 10, f"PLAN STRUCTUREL - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE")
+
+    c.setFont("Helvetica", 9)
+    for p in layout_positions:
+        x_m = p["x_m"]
+        y_m = p["y_m"]
+        w_m = p["w_m"]
+        l_m = p["l_m"]
+        room = p["room"]
+
+        x_pt = margin + x_m * scale
+        y_pt = height - margin - (y_m + l_m) * scale
+        w_pt = w_m * scale
+        h_pt = l_m * scale
+
+        c.setLineWidth(1.5)
+        c.rect(x_pt, y_pt, w_pt, h_pt)
+
+        c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2, room.get("name", "Pièce"))
+
+        col = 0.25 * scale
+        for dx, dy in [(0, 0), (w_pt - col, 0), (0, h_pt - col), (w_pt - col, h_pt - col)]:
+            c.rect(x_pt + dx, y_pt + dy, col, col, stroke=1, fill=1)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+def render_mep_pdf_bytes(plan_spec: Dict[str, Any]) -> bytes:
+    buf = io.BytesIO()
+    page_size = landscape(A3)
+    c = canvas.Canvas(buf, pagesize=page_size)
+    width, height = page_size
+    margin = 40
+
+    floors = plan_spec.get("floors", [])
+    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
+    rooms = floor.get("rooms", [])
+
+    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
+
+    if total_w_m <= 0:
+        total_w_m = 8.0
+    if total_h_m <= 0:
+        total_h_m = 8.0
+
+    max_width_pts = width - 2 * margin
+    max_height_pts = height - 2 * margin
+    scale_x = max_width_pts / total_w_m
+    scale_y = max_height_pts / total_h_m
+    scale = min(scale_x, scale_y)
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(margin, height - margin + 10, f"PLAN MEP - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE")
+
+    c.setFont("Helvetica", 9)
+    for p in layout_positions:
+        x_m = p["x_m"]
+        y_m = p["y_m"]
+        w_m = p["w_m"]
+        l_m = p["l_m"]
+        room = p["room"]
+
+        x_pt = margin + x_m * scale
+        y_pt = height - margin - (y_m + l_m) * scale
+        w_pt = w_m * scale
+        h_pt = l_m * scale
+
+        c.setLineWidth(0.8)
+        c.rect(x_pt, y_pt, w_pt, h_pt)
+
+        c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2, room.get("name", "Pièce"))
+
+        name = (room.get("name") or "").lower()
+        is_wet = room.get("is_wet_area", False)
+
+        if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
+            px = x_pt + 0.6 * scale
+            py = y_pt + 0.6 * scale
+            r = 0.15 * scale
+            c.circle(px, py, r)
+            c.drawString(px + r + 2, py, "PE")
+
+            c.line(px + 0.3 * scale, py - 0.3 * scale, px + 0.5 * scale, py - 0.3 * scale)
+            c.line(px + 0.3 * scale, py - 0.3 * scale, px + 0.4 * scale, py - 0.1 * scale)
+            c.line(px + 0.5 * scale, py - 0.3 * scale, px + 0.4 * scale, py - 0.1 * scale)
+
+        pcx = x_pt + 0.2 * scale
+        pcy = y_pt + 0.2 * scale
+        c.rect(pcx, pcy, 0.2 * scale, 0.2 * scale)
+        c.drawString(pcx + 0.22 * scale, pcy + 0.07 * scale, "PC")
+
+        rjx = x_pt + 0.2 * scale
+        rjy = y_pt + 0.6 * scale
+        c.rect(rjx, rjy, 0.2 * scale, 0.2 * scale)
+        c.drawString(rjx + 0.22 * scale, rjy + 0.07 * scale, "RJ")
+
+        lx = x_pt + w_pt / 2
+        ly = y_pt + h_pt / 2
+        c.setLineWidth(1.0)
+        c.line(lx - 0.1 * scale, ly, lx + 0.1 * scale, ly)
+        c.line(lx, ly - 0.1 * scale, lx, ly + 0.1 * scale)
+
+    c.showPage()
+    c.save()
+    buf.seek(0)
+    return buf.getvalue()
+
+
+# ============================================================
 # Génération DXF (CAD) STRUCTURE & MEP
 # ============================================================
 
 def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
-    """
-    Génère un DXF simplifié pour le plan STRUCTURE :
-    - Contours de pièces
-    - Noms de pièces
-    - Poteaux en coins
-    """
     if ezdxf is None:
         raise HTTPException(
             status_code=500,
@@ -832,7 +894,7 @@ def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
     doc = ezdxf.new(setup=True)
     msp = doc.modelspace()
 
-    scale = 1000.0  # 1 m = 1000 unités DXF
+    scale = 1000.0
     floors = plan_spec.get("floors", [])
     floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
     rooms = floor.get("rooms", [])
@@ -851,14 +913,12 @@ def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
         x2 = (x_m + w_m) * scale
         y2 = (y_m + l_m) * scale
 
-        # Contour
         msp.add_lwpolyline(
             [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)],
             dxfattribs={"layer": "STRUCTURE_ROOMS"},
         )
 
-        # Poteaux simples aux 4 coins
-        col_size = 0.25 * scale  # 0.25 m
+        col_size = 0.25 * scale
         for (cx, cy) in [
             (x1, y1),
             (x2 - col_size, y1),
@@ -870,7 +930,6 @@ def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
                 dxfattribs={"layer": "STRUCTURE_COLUMNS"},
             )
 
-        # Nom de pièce
         msp.add_text(
             room.get("name", "Pièce"),
             dxfattribs={"height": 0.3 * scale, "layer": "ANNOTATIONS"},
@@ -883,12 +942,6 @@ def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
 
 
 def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
-    """
-    Génère un DXF simplifié pour le MEP :
-    - Contours de pièces
-    - Points d'eau / évacuations
-    - Prises CF/CFa
-    """
     if ezdxf is None:
         raise HTTPException(
             status_code=500,
@@ -898,7 +951,7 @@ def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
     doc = ezdxf.new(setup=True)
     msp = doc.modelspace()
 
-    scale = 1000.0  # 1 m = 1000 unités DXF
+    scale = 1000.0
     floors = plan_spec.get("floors", [])
     floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
     rooms = floor.get("rooms", [])
@@ -917,7 +970,6 @@ def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
         x2 = (x_m + w_m) * scale
         y2 = (y_m + l_m) * scale
 
-        # Contour
         msp.add_lwpolyline(
             [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)],
             dxfattribs={"layer": "MEP_ROOMS"},
@@ -926,15 +978,12 @@ def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
         name = (room.get("name") or "").lower()
         is_wet = room.get("is_wet_area", False)
 
-        # Plomberie (pièces humides)
         if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
             px = x1 + 0.5 * scale
             py = y1 + 0.5 * scale
 
-            # Point d'eau = cercle
             msp.add_circle((px, py), radius=0.15 * scale, dxfattribs={"layer": "MEP_PLOMBERIE"})
 
-            # Evacuation = triangle
             msp.add_solid(
                 [
                     (px + 0.3 * scale, py),
@@ -944,7 +993,6 @@ def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
                 dxfattribs={"layer": "MEP_PLOMBERIE"},
             )
 
-        # Prise courant fort (symbole simple)
         pcx = x1 + 0.2 * scale
         pcy = y1 + 0.2 * scale
         msp.add_lwpolyline(
@@ -958,7 +1006,6 @@ def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
             dxfattribs={"layer": "MEP_CF"},
         )
 
-        # Prise courant faible / data
         rjx = x1 + 0.2 * scale
         rjy = y1 + 0.6 * scale
         msp.add_lwpolyline(
@@ -1273,7 +1320,7 @@ def create_project(payload: ProjectCreate):
         "report_pdf_key": None,
         "report_docx_key": None,
         "aps": {
-            "structure": None,  # {"object_id":..., "urn":...}
+            "structure": None,
             "mep": None,
         },
     }
@@ -1372,17 +1419,14 @@ def analyze_project(project_id: str):
 
     arch_bytes = r2_get_bytes(arch_key)
 
-    # 1) plan_spec via OpenAI
     plan_spec = get_plan_spec_from_ai(file_name=arch_key, file_bytes=arch_bytes, edge_compliant=edge_compliant)
     PROJECT_DATA[project_id]["plan_spec"] = plan_spec
 
-    # 2) Plans STRUCTURE & MEP (SVG)
     structure_svg = render_structure_svg(plan_spec)
     mep_svg = render_mep_svg(plan_spec)
     PROJECT_DATA[project_id]["structure_svg"] = structure_svg
     PROJECT_DATA[project_id]["mep_svg"] = mep_svg
 
-    # 3) Rapport Markdown
     edge_label = "EDGE-compatible" if edge_compliant else "standard (sans certification explicite EDGE)"
 
     prompt = f"""
@@ -1474,7 +1518,6 @@ def get_mep_svg_route(project_id: str):
     )
 
 
-# Alias de compatibilité pour ton ancien front
 @app.get("/projects/{project_id}/schematics/svg")
 def get_schematics_svg_route(project_id: str):
     return get_structure_svg_route(project_id)
@@ -1485,11 +1528,11 @@ def get_structure_pdf_route(project_id: str):
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    svg = PROJECT_DATA[project_id].get("structure_svg")
-    if not svg:
-        raise HTTPException(status_code=404, detail="Structure plan not generated yet. Call /analyze first.")
+    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
+    if not plan_spec:
+        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
 
-    pdf_bytes = svg_to_pdf_bytes(svg)
+    pdf_bytes = render_structure_pdf_bytes(plan_spec)
     stream = io.BytesIO(pdf_bytes)
     filename = f"{project_id}_plan_structure.pdf"
 
@@ -1505,11 +1548,11 @@ def get_mep_pdf_route(project_id: str):
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
 
-    svg = PROJECT_DATA[project_id].get("mep_svg")
-    if not svg:
-        raise HTTPException(status_code=404, detail="MEP plan not generated yet. Call /analyze first.")
+    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
+    if not plan_spec:
+        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
 
-    pdf_bytes = svg_to_pdf_bytes(svg)
+    pdf_bytes = render_mep_pdf_bytes(plan_spec)
     stream = io.BytesIO(pdf_bytes)
     filename = f"{project_id}_plan_mep.pdf"
 
@@ -1692,9 +1735,6 @@ def export_report_docx(project_id: str):
 
 @app.get("/aps/status")
 def aps_status():
-    """
-    Permet au front ou à toi de vérifier rapidement si APS est configuré côté backend.
-    """
     return {
         "enabled": APS_ENABLED,
         "bucket_key": APS_BUCKET_KEY.lower() if APS_BUCKET_KEY else None,
@@ -1704,10 +1744,6 @@ def aps_status():
 
 @app.get("/aps/token")
 def aps_token():
-    """
-    Fournit un token 2-legged APS que le frontend peut utiliser pour le viewer.
-    (Pour un vrai produit en prod, tu pourras filtrer les scopes / faire un proxy.)
-    """
     _require_aps()
     token_json = get_aps_token()
     return token_json
@@ -1718,17 +1754,6 @@ def publish_plan_to_aps(
     project_id: str,
     kind: str = Query(..., regex="^(structure|mep)$", description="structure ou mep"),
 ):
-    """
-    Publie le plan STRUCTURE ou MEP en DXF vers APS et lance la traduction.
-    - kind=structure → structure.dxf
-    - kind=mep       → mep.dxf
-
-    Stocke dans PROJECT_DATA[project_id]["aps"][kind] :
-    {
-      "object_id": "...",
-      "urn": "..."
-    }
-    """
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -1741,7 +1766,6 @@ def publish_plan_to_aps(
             detail="plan_spec not available. Call /projects/{project_id}/analyze first.",
         )
 
-    # Génération DXF en mémoire
     if kind == "structure":
         dxf_bytes = render_structure_dxf(plan_spec)
         object_name = f"{project_id}_structure.dxf"
@@ -1749,12 +1773,10 @@ def publish_plan_to_aps(
         dxf_bytes = render_mep_dxf(plan_spec)
         object_name = f"{project_id}_mep.dxf"
 
-    # 1) Token APS + bucket
     token_json = get_aps_token()
     access_token = token_json["access_token"]
     ensure_aps_bucket(access_token)
 
-    # 2) Upload DXF dans OSS
     upload_info = upload_to_aps(
         token=access_token,
         object_name=object_name,
@@ -1768,11 +1790,9 @@ def publish_plan_to_aps(
             detail=f"APS upload did not return objectId: {upload_info}",
         )
 
-    # 3) Lancer la traduction Model Derivative
     job_result = start_aps_translation(access_token, object_id=object_id)
     urn = job_result.get("urn")
 
-    # 4) Stocker l'URN côté projet
     if "aps" not in PROJECT_DATA[project_id]:
         PROJECT_DATA[project_id]["aps"] = {"structure": None, "mep": None}
 
@@ -1794,9 +1814,6 @@ def publish_plan_to_aps(
 
 @app.get("/projects/{project_id}/aps")
 def get_project_aps_info(project_id: str):
-    """
-    Renvoie les infos APS (URN) pour STRUCTURE & MEP pour brancher le viewer côté front.
-    """
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
     aps_info = PROJECT_DATA[project_id].get("aps") or {}
