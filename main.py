@@ -3,15 +3,21 @@ import uuid
 import base64
 import io
 import json
+import math
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.client import Config
-from fastapi import FastAPI, UploadFile, File, HTTPException
+import requests
+from fastapi import FastAPI, UploadFile, File, HTTPException, Body, Query
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
+from docx import Document  # python-docx
+from reportlab.lib.pagesizes import letter
+from reportlab.pdfgen import canvas
+import svgwrite
 
 # ============================================================
 # Config OpenAI
@@ -50,6 +56,139 @@ s3_client = boto3.client(
 )
 
 # ============================================================
+# Config Autodesk Platform Services (APS / Forge)
+# ============================================================
+
+APS_CLIENT_ID = os.getenv("APS_CLIENT_ID")
+APS_CLIENT_SECRET = os.getenv("APS_CLIENT_SECRET")
+APS_BUCKET_KEY = os.getenv("APS_BUCKET_KEY")  # doit être en minuscules, sans espaces
+APS_REGION = os.getenv("APS_REGION") or "US"
+
+APS_ENABLED = bool(APS_CLIENT_ID and APS_CLIENT_SECRET and APS_BUCKET_KEY)
+
+APS_AUTH_URL = "https://developer.api.autodesk.com/authentication/v2/token"
+APS_OSS_BASE = "https://developer.api.autodesk.com/oss/v2"
+APS_MD_BASE = "https://developer.api.autodesk.com/modelderivative/v2"
+
+
+def _require_aps():
+    if not APS_ENABLED:
+        raise HTTPException(
+            status_code=400,
+            detail="APS (Forge) n'est pas configuré. Définis APS_CLIENT_ID, APS_CLIENT_SECRET et APS_BUCKET_KEY.",
+        )
+
+
+def get_aps_token(scopes: Optional[List[str]] = None) -> str:
+    """
+    Récupère un token 2-legged APS pour les scopes donnés.
+    Scopes typiques : data:read data:write data:create bucket:read bucket:create
+    """
+    if scopes is None:
+        scopes = ["data:read", "data:write", "data:create", "bucket:read", "bucket:create"]
+
+    data = {
+        "grant_type": "client_credentials",
+        "client_id": APS_CLIENT_ID,
+        "client_secret": APS_CLIENT_SECRET,
+        "scope": " ".join(scopes),
+    }
+    resp = requests.post(APS_AUTH_URL, data=data)
+    if resp.status_code != 200:
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS auth failed: {resp.status_code} {resp.text}",
+        )
+    return resp.json()["access_token"]
+
+
+def ensure_aps_bucket(token: str) -> None:
+    """
+    Crée le bucket OSS si nécessaire.
+    APS_BUCKET_KEY doit être unique sur l'org, en minuscules.
+    """
+    bucket_key = APS_BUCKET_KEY.lower()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "bucketKey": bucket_key,
+        "policyKey": "persistent",
+    }
+    # On tente de le créer, si conflit => il existe déjà, on ignore.
+    resp = requests.post(f"{APS_OSS_BASE}/buckets", headers=headers, json=payload)
+    if resp.status_code in (200, 201):
+        return
+    if resp.status_code == 409:
+        # Already exists
+        return
+    # Autre erreur
+    raise HTTPException(
+        status_code=500,
+        detail=f"APS bucket creation failed: {resp.status_code} {resp.text}",
+    )
+
+
+def upload_to_aps(token: str, object_name: str, data: bytes, content_type: str = "application/octet-stream") -> Dict[str, Any]:
+    """
+    Upload un fichier (SVG, DWG, etc.) dans le bucket APS.
+    Retourne la réponse JSON oss (bucketKey, objectId, objectKey, size, etc.)
+    """
+    bucket_key = APS_BUCKET_KEY.lower()
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": content_type,
+    }
+    url = f"{APS_OSS_BASE}/buckets/{bucket_key}/objects/{object_name}"
+    resp = requests.put(url, headers=headers, data=data)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS upload failed: {resp.status_code} {resp.text}",
+        )
+    return resp.json()
+
+
+def start_aps_translation(token: str, object_id: str, output_format: str = "svf2") -> Dict[str, Any]:
+    """
+    Lance un job Model Derivative pour générer un viewer-ready format (SVF2).
+    object_id provient de la réponse OSS (urn:adsk.objects:os.object:...).
+    On encode en base64 sans padding pour construire l'URN.
+    """
+    urn_bytes = object_id.encode("utf-8")
+    urn_b64 = base64.b64encode(urn_bytes).decode("utf-8").rstrip("=")
+
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "application/json",
+    }
+    # Job minimal pour 2D/3D viewer
+    job = {
+        "input": {
+            "urn": urn_b64,
+        },
+        "output": {
+            "formats": [
+                {
+                    "type": output_format,
+                    "views": ["2d", "3d"],
+                }
+            ]
+        },
+    }
+    resp = requests.post(f"{APS_MD_BASE}/designdata/job", headers=headers, json=job)
+    if resp.status_code not in (200, 201):
+        raise HTTPException(
+            status_code=500,
+            detail=f"APS translation job failed: {resp.status_code} {resp.text}",
+        )
+    result = resp.json()
+    result["urn"] = urn_b64
+    return result
+
+
+# ============================================================
 # Modèles & stockage en mémoire
 # ============================================================
 
@@ -66,7 +205,7 @@ class Project(BaseModel):
 
 # Projets et données associées stockées en mémoire
 PROJECTS: Dict[str, Project] = {}
-PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, SVG, plan_spec, etc.
+PROJECT_DATA: Dict[str, Dict] = {}  # fichiers, report_markdown, SVG, plan_spec, APS URNs, etc.
 
 # ============================================================
 # Helpers R2
@@ -93,10 +232,6 @@ def r2_get_bytes(key: str) -> bytes:
 # ============================================================
 # Helpers exports (PDF / DOCX)
 # ============================================================
-
-from docx import Document  # python-docx
-from reportlab.lib.pagesizes import letter
-from reportlab.pdfgen import canvas
 
 
 def markdown_to_docx_bytes(markdown_text: str) -> bytes:
@@ -141,10 +276,9 @@ def markdown_to_pdf_bytes(markdown_text: str) -> bytes:
 
 
 # ============================================================
-# Fallback PNG (si OpenAI Images indisponible)
+# Fallback PNG (si OpenAI Images indisponible) – pas utilisé pour l'instant
 # ============================================================
 
-# 1x1 px PNG blanc (base64)
 HERO_PLACEHOLDER_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Yp3GxkAAAAASUVORK5CYII="
 )
@@ -160,16 +294,13 @@ def get_placeholder_png_bytes() -> bytes:
 
 app = FastAPI(
     title="Archito-Genie Backend",
-    description="MVP backend avec stockage Cloudflare R2 + génération de plans STRUCTURE/MEP",
-    version="0.3.0",
+    description="MVP backend avec stockage Cloudflare R2 + génération de plans STRUCTURE/MEP + APS",
+    version="0.4.0",
 )
 
 # ============================================================
 # Rendu SVG STRUCTURE & MEP (moteur interne)
 # ============================================================
-
-import math
-import svgwrite
 
 
 def _layout_rooms(rooms: List[Dict[str, Any]], scale: float = 40.0):
@@ -794,6 +925,12 @@ CONTRAINTES :
 # ============================================================
 
 
+class ProjectFilesInfo(BaseModel):
+    architectural_plan_key: Optional[str]
+    soil_report_key: Optional[str]
+    additional_files_keys: List[str] = []
+
+
 @app.post("/projects", response_model=Project)
 def create_project(payload: ProjectCreate):
     project_id = str(uuid.uuid4())
@@ -809,6 +946,10 @@ def create_project(payload: ProjectCreate):
         "plan_spec": None,
         "structure_svg": "",
         "mep_svg": "",
+        "aps": {  # pour stocker URN, objectId, etc.
+            "structure": None,
+            "mep": None,
+        },
         "hero_key": None,         # plus utilisé pour l'instant
         "report_pdf_key": None,
         "report_docx_key": None,
@@ -891,7 +1032,7 @@ def analyze_project(project_id: str):
     - Vérifie la présence du plan archi
     - Appelle OpenAI pour générer un plan_spec (JSON)
     - Génère les SVG STRUCTURE & MEP
-    - Génère un rapport Markdown (comme avant) pour le storytelling
+    - Génère un rapport Markdown (storytelling)
     """
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
@@ -920,7 +1061,7 @@ def analyze_project(project_id: str):
     PROJECT_DATA[project_id]["structure_svg"] = structure_svg
     PROJECT_DATA[project_id]["mep_svg"] = mep_svg
 
-    # 4) Rapport Markdown (garde ton ancienne logique, mais enrichie)
+    # 4) Rapport Markdown
     prompt = f"""
 Tu es un assistant d'ingénierie pour un SaaS nommé Archito-Genie.
 
@@ -1010,7 +1151,6 @@ def get_mep_svg(project_id: str):
 
 # ============================================================
 # Compat : /schematics/svg renvoie le plan STRUCTURE
-# (ancien endpoint réutilisé pour ne pas casser Lovable)
 # ============================================================
 
 
@@ -1046,6 +1186,98 @@ def get_schematics_svg(project_id: str):
 
 
 # ============================================================
+# Publication vers APS (Forge)
+# ============================================================
+
+
+@app.post("/projects/{project_id}/publish/aps")
+def publish_to_aps(
+    project_id: str,
+    kind: str = Query("structure", pattern="^(structure|mep)$"),
+):
+    """
+    Publie un plan (structure ou MEP) vers Autodesk Platform Services (OSS + Model Derivative).
+
+    - kind = "structure" ou "mep"
+    - Upload le SVG courant dans le bucket APS
+    - Lance un job Model Derivative (SVF2)
+    - Retourne l'URN APS (à utiliser dans le viewer côté front)
+    """
+    _require_aps()
+
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    if kind not in ("structure", "mep"):
+        raise HTTPException(status_code=400, detail="kind must be 'structure' or 'mep'")
+
+    svg_key = "structure_svg" if kind == "structure" else "mep_svg"
+    svg = PROJECT_DATA[project_id].get(svg_key)
+    if not svg:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{kind.capitalize()} plan not generated yet. Call /projects/{project_id}/analyze first.",
+        )
+
+    # 1) Token APS
+    token = get_aps_token()
+
+    # 2) S'assurer que le bucket existe
+    ensure_aps_bucket(token)
+
+    # 3) Upload du SVG
+    object_name = f"{project_id}_{kind}.svg"
+    upload_info = upload_to_aps(
+        token=token,
+        object_name=object_name,
+        data=svg.encode("utf-8"),
+        content_type="image/svg+xml",
+    )
+    object_id = upload_info.get("objectId")
+    if not object_id:
+        raise HTTPException(
+            status_code=500,
+            detail="APS upload did not return objectId.",
+        )
+
+    # 4) Lancer le job de traduction (SVF2 pour viewer)
+    translation_info = start_aps_translation(token=token, object_id=object_id, output_format="svf2")
+
+    # 5) Sauvegarder les infos APS pour ce projet
+    PROJECT_DATA[project_id].setdefault("aps", {})
+    PROJECT_DATA[project_id]["aps"][kind] = {
+        "bucketKey": upload_info.get("bucketKey"),
+        "objectId": object_id,
+        "objectKey": upload_info.get("objectKey"),
+        "urn": translation_info.get("urn"),
+        "raw_upload_response": upload_info,
+        "raw_translation_response": translation_info,
+    }
+
+    return {
+        "project_id": project_id,
+        "kind": kind,
+        "aps": PROJECT_DATA[project_id]["aps"][kind],
+    }
+
+
+@app.get("/projects/{project_id}/aps")
+def get_project_aps_info(project_id: str):
+    """
+    Récupère les infos APS (urn, objectId, etc.) pour structure et MEP.
+    Utile côté front pour initialiser le viewer APS.
+    """
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    aps_info = PROJECT_DATA[project_id].get("aps") or {}
+    return {
+        "project_id": project_id,
+        "aps": aps_info,
+    }
+
+
+# ============================================================
 # Export PDF & DOCX (rapport)
 # ============================================================
 
@@ -1075,4 +1307,42 @@ def export_report_pdf(project_id: str):
 
 
 @app.get("/projects/{project_id}/export/docx")
-def expo
+def export_report_docx(project_id: str):
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    report_md = PROJECT_DATA[project_id].get("report_markdown")
+    if not report_md:
+        raise HTTPException(status_code=400, detail="Report not generated yet")
+
+    docx_bytes = markdown_to_docx_bytes(report_md)
+    key = f"projects/{project_id}/output/report.docx"
+    r2_put_bytes(
+        key,
+        docx_bytes,
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    PROJECT_DATA[project_id]["report_docx_key"] = key
+
+    stream = io.BytesIO(docx_bytes)
+    filename = f"{project_id}_report.docx"
+
+    return StreamingResponse(
+        stream,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ============================================================
+# Healthcheck
+# ============================================================
+
+
+@app.get("/")
+def healthcheck():
+    return {
+        "status": "ok",
+        "message": "Archito-Genie backend is live",
+        "aps_enabled": APS_ENABLED,
+    }
