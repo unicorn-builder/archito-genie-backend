@@ -3,29 +3,19 @@ import uuid
 import io
 import json
 import math
-import base64
 from datetime import datetime
 from typing import Dict, List, Optional, Any
 
 import boto3
 from botocore.client import Config
-import requests
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from openai import OpenAI
 from docx import Document  # python-docx
-from reportlab.lib.pagesizes import letter, A3, landscape
+from reportlab.lib.pagesizes import letter
 from reportlab.pdfgen import canvas
 import svgwrite
-
-# Imports optionnels pour CAD
-try:
-    import ezdxf  # pour générer des DXF (CAD)
-except ImportError:
-    ezdxf = None
-
-# (on n'utilise plus cairosvg pour les plans, seulement reportlab)
 
 
 # ============================================================
@@ -67,122 +57,6 @@ s3_client = boto3.client(
 
 
 # ============================================================
-# Config Autodesk Platform Services (APS / Forge)
-# ============================================================
-
-APS_CLIENT_ID = os.getenv("APS_CLIENT_ID")
-APS_CLIENT_SECRET = os.getenv("APS_CLIENT_SECRET")
-APS_BUCKET_KEY = os.getenv("APS_BUCKET_KEY")  # doit être lowercase, sans espaces
-APS_REGION = os.getenv("APS_REGION") or "US"
-
-APS_ENABLED = bool(APS_CLIENT_ID and APS_CLIENT_SECRET and APS_BUCKET_KEY)
-
-APS_AUTH_URL = "https://developer.api.autodesk.com/authentication/v2/token"
-APS_OSS_BASE = "https://developer.api.autodesk.com/oss/v2"
-APS_MD_BASE = "https://developer.api.autodesk.com/modelderivative/v2"
-
-
-def _require_aps():
-    if not APS_ENABLED:
-        raise HTTPException(
-            status_code=400,
-            detail="APS (Forge) n'est pas configuré. Définis APS_CLIENT_ID, APS_CLIENT_SECRET et APS_BUCKET_KEY.",
-        )
-
-
-def get_aps_token(scopes: Optional[List[str]] = None) -> Dict[str, Any]:
-    if scopes is None:
-        scopes = [
-            "data:read",
-            "data:write",
-            "data:create",
-            "bucket:read",
-            "bucket:create",
-            "viewables:read",
-        ]
-
-    data = {
-        "grant_type": "client_credentials",
-        "client_id": APS_CLIENT_ID,
-        "client_secret": APS_CLIENT_SECRET,
-        "scope": " ".join(scopes),
-    }
-    resp = requests.post(APS_AUTH_URL, data=data)
-    if resp.status_code != 200:
-        raise HTTPException(
-            status_code=500,
-            detail=f"APS auth failed: {resp.status_code} {resp.text}",
-        )
-    return resp.json()
-
-
-def ensure_aps_bucket(token: str) -> None:
-    bucket_key = APS_BUCKET_KEY.lower()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    payload = {
-        "bucketKey": bucket_key,
-        "policyKey": "persistent",
-    }
-    resp = requests.post(f"{APS_OSS_BASE}/buckets", headers=headers, json=payload)
-    if resp.status_code in (200, 201, 409):
-        return
-    raise HTTPException(
-        status_code=500,
-        detail=f"APS bucket creation failed: {resp.status_code} {resp.text}",
-    )
-
-
-def upload_to_aps(token: str, object_name: str, data: bytes, content_type: str = "application/octet-stream") -> Dict[str, Any]:
-    bucket_key = APS_BUCKET_KEY.lower()
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": content_type,
-    }
-    safe_object_name = object_name.replace(" ", "_")
-    url = f"{APS_OSS_BASE}/buckets/{bucket_key}/objects/{safe_object_name}"
-    resp = requests.put(url, headers=headers, data=data)
-    if resp.status_code not in (200, 201):
-        raise HTTPException(
-            status_code=500,
-            detail=f"APS upload failed: {resp.status_code} {resp.text}",
-        )
-    return resp.json()
-
-
-def start_aps_translation(token: str, object_id: str, output_format: str = "svf2") -> Dict[str, Any]:
-    urn_bytes = object_id.encode("utf-8")
-    urn_b64 = base64.b64encode(urn_bytes).decode("utf-8").rstrip("=")
-
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json",
-    }
-    job = {
-        "input": {"urn": urn_b64},
-        "output": {
-            "formats": [
-                {
-                    "type": output_format,
-                    "views": ["2d", "3d"],
-                }
-            ]
-        },
-    }
-    resp = requests.post(f"{APS_MD_BASE}/designdata/job", headers=headers, json=job)
-    if resp.status_code not in (200, 201):
-        raise HTTPException(
-            status_code=500,
-            detail=f"APS translation job failed: {resp.status_code} {resp.text}",
-        )
-    result = resp.json()
-    result["urn"] = urn_b64
-    return result
-
-
-# ============================================================
 # Modèles & stockage en mémoire
 # ============================================================
 
@@ -198,8 +72,12 @@ class Project(BaseModel):
     edge_compliant: bool = False
 
 
+class EdgeUpdate(BaseModel):
+    edge_compliant: bool
+
+
 PROJECTS: Dict[str, Project] = {}
-PROJECT_DATA: Dict[str, Dict] = {}
+PROJECT_DATA: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================
@@ -272,15 +150,15 @@ def markdown_to_pdf_bytes(markdown_text: str) -> bytes:
 app = FastAPI(
     title="Archito-Genie Backend",
     description=(
-        "MVP Archito-Genie : plans STRUCTURE / MEP (SVG, PDF, DXF) + BOQ + datasheets + "
-        "option EDGE + intégration APS (OSS + Model Derivative)."
+        "MVP Archito-Genie : Narratifs MEPF & Automation + Schematics + "
+        "BOQ multi-variantes + Datasheets + EDGE, à partir d'un plan archi."
     ),
-    version="0.8.0",
+    version="0.9.0",
 )
 
 
 # ============================================================
-# Mise en page des pièces (pour STRUCTURE & MEP)
+# Outil interne : layout de pièces (pour raisonner MEP)
 # ============================================================
 
 def _layout_rooms(rooms: List[Dict[str, Any]], scale: float = 40.0):
@@ -311,722 +189,7 @@ def _layout_rooms(rooms: List[Dict[str, Any]], scale: float = 40.0):
 
 
 # ============================================================
-# Rendu SVG : PLAN STRUCTURE
-# ============================================================
-
-def render_structure_svg(spec: Dict[str, Any]) -> str:
-    scale = 40.0
-    margin = 60
-
-    floors = spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=scale)
-    width_px = int(total_w_m * scale + 2 * margin)
-    height_px = int(total_h_m * scale + 2 * margin)
-
-    dwg = svgwrite.Drawing(size=(width_px, height_px))
-    dwg.add(dwg.rect(insert=(0, 0), size=(width_px, height_px), fill="white"))
-
-    dwg.add(
-        dwg.text(
-            f"PLAN STRUCTUREL - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE",
-            insert=(margin, margin - 25),
-            font_size="18px",
-            font_family="Arial",
-            fill="black",
-        )
-    )
-
-    for p in layout_positions:
-        x = margin + p["x_m"] * scale
-        y = margin + p["y_m"] * scale
-        w = p["w_m"] * scale
-        h = p["l_m"] * scale
-        room = p["room"]
-
-        dwg.add(
-            dwg.rect(
-                insert=(x, y),
-                size=(w, h),
-                fill="none",
-                stroke="black",
-                stroke_width=3,
-            )
-        )
-        dwg.add(
-            dwg.text(
-                room.get("name", "Pièce"),
-                insert=(x + w / 2, y + h / 2),
-                text_anchor="middle",
-                alignment_baseline="middle",
-                font_size="11px",
-                font_family="Arial",
-            )
-        )
-
-        col_size = 12
-        for dx, dy in [(0, 0), (w - col_size, 0), (0, h - col_size), (w - col_size, h - col_size)]:
-            dwg.add(
-                dwg.rect(
-                    insert=(x + dx, y + dy),
-                    size=(col_size, col_size),
-                    fill="black",
-                )
-            )
-
-    start_x = margin
-    end_x = margin + total_w_m * scale
-    base_y = height_px - 20
-    dwg.add(dwg.line(start=(start_x, base_y), end=(end_x, base_y), stroke="#bbbbbb", stroke_width=1))
-    step_m = 2.0
-    x_m = 0.0
-    while x_m <= total_w_m:
-        x_px = margin + x_m * scale
-        dwg.add(dwg.line(start=(x_px, base_y - 5), end=(x_px, base_y + 5), stroke="black", stroke_width=1))
-        dwg.add(
-            dwg.text(
-                f"{x_m:.0f}",
-                insert=(x_px + 2, base_y - 7),
-                font_size="8px",
-                font_family="Arial",
-            )
-        )
-        x_m += step_m
-
-    return dwg.tostring()
-
-
-# ============================================================
-# Rendu SVG : PLAN MEP (CF / CFa / Plomberie)
-# ============================================================
-
-def render_mep_svg(spec: Dict[str, Any]) -> str:
-    scale = 40.0
-    margin = 60
-
-    floors = spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=scale)
-    width_px = int(total_w_m * scale + 2 * margin)
-    height_px = int(total_h_m * scale + 2 * margin)
-
-    dwg = svgwrite.Drawing(size=(width_px, height_px))
-    dwg.add(dwg.rect(insert=(0, 0), size=(width_px, height_px), fill="white"))
-
-    dwg.add(
-        dwg.text(
-            f"PLAN MEP - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE",
-            insert=(margin, margin - 25),
-            font_size="18px",
-            font_family="Arial",
-            fill="black",
-        )
-    )
-
-    for p in layout_positions:
-        x = margin + p["x_m"] * scale
-        y = margin + p["y_m"] * scale
-        w = p["w_m"] * scale
-        h = p["l_m"] * scale
-        room = p["room"]
-
-        dwg.add(
-            dwg.rect(
-                insert=(x, y),
-                size=(w, h),
-                fill="none",
-                stroke="#aaaaaa",
-                stroke_width=2,
-            )
-        )
-        dwg.add(
-            dwg.text(
-                room.get("name", "Pièce"),
-                insert=(x + w / 2, y + h / 2),
-                text_anchor="middle",
-                alignment_baseline="middle",
-                font_size="11px",
-                font_family="Arial",
-                fill="#444444",
-            )
-        )
-
-    core_x = margin + total_w_m * scale + 20
-    core_y = margin
-    core_w = 80
-    core_h = 220
-
-    dwg.add(
-        dwg.rect(
-            insert=(core_x, core_y),
-            size=(core_w, core_h),
-            fill="none",
-            stroke="#666666",
-            stroke_width=3,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "NOYAU\nTECHNIQUE",
-            insert=(core_x + core_w / 2, core_y + core_h / 2),
-            text_anchor="middle",
-            alignment_baseline="middle",
-            font_size="10px",
-            font_family="Arial",
-            fill="#444444",
-        )
-    )
-
-    dwg.add(
-        dwg.line(
-            start=(core_x + core_w / 2, core_y + 20),
-            end=(core_x + core_w / 2, core_y + core_h - 20),
-            stroke="#0044aa",
-            stroke_width=4,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "COL. EU/EV",
-            insert=(core_x + core_w / 2 + 5, core_y + 35),
-            font_size="9px",
-            font_family="Arial",
-            fill="#0044aa",
-        )
-    )
-
-    dwg.add(
-        dwg.rect(
-            insert=(core_x + 10, core_y + 30),
-            size=(40, 25),
-            fill="none",
-            stroke="#ff3333",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "TGBT",
-            insert=(core_x + 30, core_y + 47),
-            text_anchor="middle",
-            font_size="9px",
-            font_family="Arial",
-            fill="#ff3333",
-        )
-    )
-
-    dwg.add(
-        dwg.rect(
-            insert=(core_x + 10, core_y + 70),
-            size=(40, 25),
-            fill="none",
-            stroke="#9c27b0",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "VDI",
-            insert=(core_x + 30, core_y + 87),
-            text_anchor="middle",
-            font_size="9px",
-            font_family="Arial",
-            fill="#9c27b0",
-        )
-    )
-
-    for p in layout_positions:
-        x = margin + p["x_m"] * scale
-        y = margin + p["y_m"] * scale
-        w = p["w_m"] * scale
-        h = p["l_m"] * scale
-        room = p["room"]
-
-        name = (room.get("name") or "").lower()
-        is_wet = room.get("is_wet_area", False)
-
-        if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
-            dwg.add(
-                dwg.circle(
-                    center=(x + w * 0.2, y + h * 0.2),
-                    r=7,
-                    fill="none",
-                    stroke="#0077ff",
-                    stroke_width=2,
-                )
-            )
-            dwg.add(
-                dwg.text(
-                    "PE",
-                    insert=(x + w * 0.2 + 10, y + h * 0.2 + 3),
-                    font_size="9px",
-                    font_family="Arial",
-                    fill="#0077ff",
-                )
-            )
-            dwg.add(
-                dwg.polygon(
-                    points=[
-                        (x + w * 0.25, y + h * 0.25),
-                        (x + w * 0.27, y + h * 0.25),
-                        (x + w * 0.26, y + h * 0.23),
-                    ],
-                    fill="none",
-                    stroke="#0044aa",
-                    stroke_width=2,
-                )
-            )
-
-        dwg.add(
-            dwg.rect(
-                insert=(x + 5, y + 5),
-                size=(10, 10),
-                fill="none",
-                stroke="#ff3333",
-                stroke_width=2,
-            )
-        )
-        dwg.add(
-            dwg.text(
-                "PC",
-                insert=(x + 20, y + 14),
-                font_size="8px",
-                font_family="Arial",
-                fill="#ff3333",
-            )
-        )
-
-        dwg.add(
-            dwg.rect(
-                insert=(x + 5, y + 22),
-                size=(10, 10),
-                fill="none",
-                stroke="#9c27b0",
-                stroke_width=2,
-            )
-        )
-        dwg.add(
-            dwg.text(
-                "RJ",
-                insert=(x + 20, y + 31),
-                font_size="8px",
-                font_family="Arial",
-                fill="#9c27b0",
-            )
-        )
-
-        lum_x = x + w / 2
-        lum_y = y + h / 2
-        dwg.add(
-            dwg.line(
-                start=(lum_x - 6, lum_y),
-                end=(lum_x + 6, lum_y),
-                stroke="#ff8800",
-                stroke_width=2,
-            )
-        )
-        dwg.add(
-            dwg.line(
-                start=(lum_x, lum_y - 6),
-                end=(lum_x, lum_y + 6),
-                stroke="#ff8800",
-                stroke_width=2,
-            )
-        )
-
-    legend_x = margin
-    legend_y = height_px - 130
-    legend_w = 360
-    legend_h = 110
-
-    dwg.add(
-        dwg.rect(
-            insert=(legend_x, legend_y),
-            size=(legend_w, legend_h),
-            fill="none",
-            stroke="#999999",
-            stroke_width=1,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "LÉGENDE MEP (MVP)",
-            insert=(legend_x + 10, legend_y + 18),
-            font_size="12px",
-            font_family="Arial",
-            font_weight="bold",
-        )
-    )
-
-    dwg.add(
-        dwg.circle(
-            center=(legend_x + 15, legend_y + 35),
-            r=5,
-            fill="none",
-            stroke="#0077ff",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "Point d'eau EF/EC",
-            insert=(legend_x + 30, legend_y + 39),
-            font_size="10px",
-            font_family="Arial",
-        )
-    )
-
-    dwg.add(
-        dwg.polygon(
-            points=[
-                (legend_x + 12, legend_y + 55),
-                (legend_x + 22, legend_y + 55),
-                (legend_x + 17, legend_y + 45),
-            ],
-            fill="none",
-            stroke="#0044aa",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "Évacuation EU/EV",
-            insert=(legend_x + 30, legend_y + 59),
-            font_size="10px",
-            font_family="Arial",
-        )
-    )
-
-    dwg.add(
-        dwg.rect(
-            insert=(legend_x + 10, legend_y + 70),
-            size=(10, 10),
-            fill="none",
-            stroke="#ff3333",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "Prise courant fort (PC)",
-            insert=(legend_x + 30, legend_y + 79),
-            font_size="10px",
-            font_family="Arial",
-        )
-    )
-
-    dwg.add(
-        dwg.rect(
-            insert=(legend_x + 10, legend_y + 90),
-            size=(10, 10),
-            fill="none",
-            stroke="#9c27b0",
-            stroke_width=2,
-        )
-    )
-    dwg.add(
-        dwg.text(
-            "Prise courant faible / data (RJ45)",
-            insert=(legend_x + 30, legend_y + 99),
-            font_size="10px",
-            font_family="Arial",
-        )
-    )
-
-    return dwg.tostring()
-
-
-# ============================================================
-# PDF plans STRUCTURE & MEP (sans cairosvg, avec reportlab)
-# ============================================================
-
-def render_structure_pdf_bytes(plan_spec: Dict[str, Any]) -> bytes:
-    buf = io.BytesIO()
-    page_size = landscape(A3)
-    c = canvas.Canvas(buf, pagesize=page_size)
-    width, height = page_size
-    margin = 40
-
-    floors = plan_spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
-
-    if total_w_m <= 0:
-        total_w_m = 8.0
-    if total_h_m <= 0:
-        total_h_m = 8.0
-
-    max_width_pts = width - 2 * margin
-    max_height_pts = height - 2 * margin
-    scale_x = max_width_pts / total_w_m
-    scale_y = max_height_pts / total_h_m
-    scale = min(scale_x, scale_y)
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(margin, height - margin + 10, f"PLAN STRUCTUREL - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE")
-
-    c.setFont("Helvetica", 9)
-    for p in layout_positions:
-        x_m = p["x_m"]
-        y_m = p["y_m"]
-        w_m = p["w_m"]
-        l_m = p["l_m"]
-        room = p["room"]
-
-        x_pt = margin + x_m * scale
-        y_pt = height - margin - (y_m + l_m) * scale
-        w_pt = w_m * scale
-        h_pt = l_m * scale
-
-        c.setLineWidth(1.5)
-        c.rect(x_pt, y_pt, w_pt, h_pt)
-
-        c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2, room.get("name", "Pièce"))
-
-        col = 0.25 * scale
-        for dx, dy in [(0, 0), (w_pt - col, 0), (0, h_pt - col), (w_pt - col, h_pt - col)]:
-            c.rect(x_pt + dx, y_pt + dy, col, col, stroke=1, fill=1)
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def render_mep_pdf_bytes(plan_spec: Dict[str, Any]) -> bytes:
-    buf = io.BytesIO()
-    page_size = landscape(A3)
-    c = canvas.Canvas(buf, pagesize=page_size)
-    width, height = page_size
-    margin = 40
-
-    floors = plan_spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
-
-    if total_w_m <= 0:
-        total_w_m = 8.0
-    if total_h_m <= 0:
-        total_h_m = 8.0
-
-    max_width_pts = width - 2 * margin
-    max_height_pts = height - 2 * margin
-    scale_x = max_width_pts / total_w_m
-    scale_y = max_height_pts / total_h_m
-    scale = min(scale_x, scale_y)
-
-    c.setFont("Helvetica-Bold", 16)
-    c.drawString(margin, height - margin + 10, f"PLAN MEP - {floor.get('name', 'Niveau 0')} - ARCHITO-GENIE")
-
-    c.setFont("Helvetica", 9)
-    for p in layout_positions:
-        x_m = p["x_m"]
-        y_m = p["y_m"]
-        w_m = p["w_m"]
-        l_m = p["l_m"]
-        room = p["room"]
-
-        x_pt = margin + x_m * scale
-        y_pt = height - margin - (y_m + l_m) * scale
-        w_pt = w_m * scale
-        h_pt = l_m * scale
-
-        c.setLineWidth(0.8)
-        c.rect(x_pt, y_pt, w_pt, h_pt)
-
-        c.drawCentredString(x_pt + w_pt / 2, y_pt + h_pt / 2, room.get("name", "Pièce"))
-
-        name = (room.get("name") or "").lower()
-        is_wet = room.get("is_wet_area", False)
-
-        if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
-            px = x_pt + 0.6 * scale
-            py = y_pt + 0.6 * scale
-            r = 0.15 * scale
-            c.circle(px, py, r)
-            c.drawString(px + r + 2, py, "PE")
-
-            c.line(px + 0.3 * scale, py - 0.3 * scale, px + 0.5 * scale, py - 0.3 * scale)
-            c.line(px + 0.3 * scale, py - 0.3 * scale, px + 0.4 * scale, py - 0.1 * scale)
-            c.line(px + 0.5 * scale, py - 0.3 * scale, px + 0.4 * scale, py - 0.1 * scale)
-
-        pcx = x_pt + 0.2 * scale
-        pcy = y_pt + 0.2 * scale
-        c.rect(pcx, pcy, 0.2 * scale, 0.2 * scale)
-        c.drawString(pcx + 0.22 * scale, pcy + 0.07 * scale, "PC")
-
-        rjx = x_pt + 0.2 * scale
-        rjy = y_pt + 0.6 * scale
-        c.rect(rjx, rjy, 0.2 * scale, 0.2 * scale)
-        c.drawString(rjx + 0.22 * scale, rjy + 0.07 * scale, "RJ")
-
-        lx = x_pt + w_pt / 2
-        ly = y_pt + h_pt / 2
-        c.setLineWidth(1.0)
-        c.line(lx - 0.1 * scale, ly, lx + 0.1 * scale, ly)
-        c.line(lx, ly - 0.1 * scale, lx, ly + 0.1 * scale)
-
-    c.showPage()
-    c.save()
-    buf.seek(0)
-    return buf.getvalue()
-
-
-# ============================================================
-# Génération DXF (CAD) STRUCTURE & MEP
-# ============================================================
-
-def render_structure_dxf(plan_spec: Dict[str, Any]) -> bytes:
-    if ezdxf is None:
-        raise HTTPException(
-            status_code=500,
-            detail="La génération CAD (DXF) nécessite 'ezdxf'. Ajoute-le à requirements.txt."
-        )
-
-    doc = ezdxf.new(setup=True)
-    msp = doc.modelspace()
-
-    scale = 1000.0
-    floors = plan_spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
-
-    for p in layout_positions:
-        x_m = p["x_m"]
-        y_m = p["y_m"]
-        w_m = p["w_m"]
-        l_m = p["l_m"]
-        room = p["room"]
-
-        x1 = x_m * scale
-        y1 = y_m * scale
-        x2 = (x_m + w_m) * scale
-        y2 = (y_m + l_m) * scale
-
-        msp.add_lwpolyline(
-            [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)],
-            dxfattribs={"layer": "STRUCTURE_ROOMS"},
-        )
-
-        col_size = 0.25 * scale
-        for (cx, cy) in [
-            (x1, y1),
-            (x2 - col_size, y1),
-            (x1, y2 - col_size),
-            (x2 - col_size, y2 - col_size),
-        ]:
-            msp.add_solid(
-                [(cx, cy), (cx + col_size, cy), (cx + col_size, cy + col_size), (cx, cy + col_size)],
-                dxfattribs={"layer": "STRUCTURE_COLUMNS"},
-            )
-
-        msp.add_text(
-            room.get("name", "Pièce"),
-            dxfattribs={"height": 0.3 * scale, "layer": "ANNOTATIONS"},
-        ).set_pos(((x1 + x2) / 2, (y1 + y2) / 2), align="MIDDLE_CENTER")
-
-    buf = io.BytesIO()
-    doc.write(stream=buf)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-def render_mep_dxf(plan_spec: Dict[str, Any]) -> bytes:
-    if ezdxf is None:
-        raise HTTPException(
-            status_code=500,
-            detail="La génération CAD (DXF) nécessite 'ezdxf'. Ajoute-le à requirements.txt."
-        )
-
-    doc = ezdxf.new(setup=True)
-    msp = doc.modelspace()
-
-    scale = 1000.0
-    floors = plan_spec.get("floors", [])
-    floor = floors[0] if floors else {"name": "Niveau 0", "rooms": []}
-    rooms = floor.get("rooms", [])
-
-    layout_positions, total_w_m, total_h_m = _layout_rooms(rooms, scale=1.0)
-
-    for p in layout_positions:
-        x_m = p["x_m"]
-        y_m = p["y_m"]
-        w_m = p["w_m"]
-        l_m = p["l_m"]
-        room = p["room"]
-
-        x1 = x_m * scale
-        y1 = y_m * scale
-        x2 = (x_m + w_m) * scale
-        y2 = (y_m + l_m) * scale
-
-        msp.add_lwpolyline(
-            [(x1, y1), (x2, y1), (x2, y2), (x1, y2), (x1, y1)],
-            dxfattribs={"layer": "MEP_ROOMS"},
-        )
-
-        name = (room.get("name") or "").lower()
-        is_wet = room.get("is_wet_area", False)
-
-        if is_wet or any(k in name for k in ["bain", "sdb", "wc", "toilet", "cuisine", "kitchen"]):
-            px = x1 + 0.5 * scale
-            py = y1 + 0.5 * scale
-
-            msp.add_circle((px, py), radius=0.15 * scale, dxfattribs={"layer": "MEP_PLOMBERIE"})
-
-            msp.add_solid(
-                [
-                    (px + 0.3 * scale, py),
-                    (px + 0.5 * scale, py),
-                    (px + 0.4 * scale, py + 0.2 * scale),
-                ],
-                dxfattribs={"layer": "MEP_PLOMBERIE"},
-            )
-
-        pcx = x1 + 0.2 * scale
-        pcy = y1 + 0.2 * scale
-        msp.add_lwpolyline(
-            [
-                (pcx, pcy),
-                (pcx + 0.2 * scale, pcy),
-                (pcx + 0.2 * scale, pcy + 0.2 * scale),
-                (pcx, pcy + 0.2 * scale),
-                (pcx, pcy),
-            ],
-            dxfattribs={"layer": "MEP_CF"},
-        )
-
-        rjx = x1 + 0.2 * scale
-        rjy = y1 + 0.6 * scale
-        msp.add_lwpolyline(
-            [
-                (rjx, rjy),
-                (rjx + 0.2 * scale, rjy),
-                (rjx + 0.2 * scale, rjy + 0.2 * scale),
-                (rjx, rjy + 0.2 * scale),
-                (rjx, rjy),
-            ],
-            dxfattribs={"layer": "MEP_CFA"},
-        )
-
-    buf = io.BytesIO()
-    doc.write(stream=buf)
-    buf.seek(0)
-    return buf.getvalue()
-
-
-# ============================================================
-# Extraction plan_spec via OpenAI (avec EDGE ou non)
+# AI : génération du modèle de projet (plan_spec)
 # ============================================================
 
 def get_plan_spec_from_ai(file_name: str, file_bytes: bytes, edge_compliant: bool) -> Dict[str, Any]:
@@ -1041,7 +204,7 @@ Contexte EDGE : {edge_text}
 
 TA TÂCHE :
 - Construire une hypothèse réaliste de bâtiment basée sur ce que tu sais des immeubles
-  résidentiels/mixtes.
+  résidentiels/mixtes (ou tertiaires) typiques.
 - Si EDGE = OUI, favorise compacité, éclairage naturel, ventilation naturelle, etc.
 
 - Renvoie STRICTEMENT un JSON avec le format suivant :
@@ -1056,10 +219,13 @@ TA TÂCHE :
       "rooms": [
         {{
           "name": "Séjour",
+          "usage": "living_room | bedroom | kitchen | circulation | sanitary | technical | office | retail | meeting",
           "width_m": 5.0,
           "length_m": 6.0,
           "has_window": true,
-          "is_wet_area": false
+          "is_wet_area": false,
+          "is_technical_room": false,
+          "expected_occupancy": 3
         }}
       ]
     }}
@@ -1081,7 +247,8 @@ CONTRAINTES :
                     "role": "system",
                     "content": (
                         "Tu es un assistant d'ingénierie bâtiment. "
-                        "Tu produis une description JSON cohérente de la distribution des pièces."
+                        "Tu produis une description JSON cohérente de la distribution des pièces, "
+                        "en préparant le terrain pour des études MEPF & Automation."
                     ),
                 },
                 {"role": "user", "content": user_content},
@@ -1102,11 +269,56 @@ CONTRAINTES :
                     "name": "RDC",
                     "level": 0,
                     "rooms": [
-                        {"name": "Séjour", "width_m": 5.0, "length_m": 6.0, "has_window": True, "is_wet_area": False},
-                        {"name": "Cuisine", "width_m": 3.0, "length_m": 4.0, "has_window": True, "is_wet_area": True},
-                        {"name": "Chambre 1", "width_m": 4.0, "length_m": 4.0, "has_window": True, "is_wet_area": False},
-                        {"name": "Chambre 2", "width_m": 3.5, "length_m": 3.5, "has_window": True, "is_wet_area": False},
-                        {"name": "Salle de bain", "width_m": 3.0, "length_m": 3.0, "has_window": False, "is_wet_area": True},
+                        {
+                            "name": "Séjour",
+                            "usage": "living_room",
+                            "width_m": 5.0,
+                            "length_m": 6.0,
+                            "has_window": True,
+                            "is_wet_area": False,
+                            "is_technical_room": False,
+                            "expected_occupancy": 4,
+                        },
+                        {
+                            "name": "Cuisine",
+                            "usage": "kitchen",
+                            "width_m": 3.0,
+                            "length_m": 4.0,
+                            "has_window": True,
+                            "is_wet_area": True,
+                            "is_technical_room": False,
+                            "expected_occupancy": 2,
+                        },
+                        {
+                            "name": "Chambre 1",
+                            "usage": "bedroom",
+                            "width_m": 4.0,
+                            "length_m": 4.0,
+                            "has_window": True,
+                            "is_wet_area": False,
+                            "is_technical_room": False,
+                            "expected_occupancy": 2,
+                        },
+                        {
+                            "name": "Chambre 2",
+                            "usage": "bedroom",
+                            "width_m": 3.5,
+                            "length_m": 3.5,
+                            "has_window": True,
+                            "is_wet_area": False,
+                            "is_technical_room": False,
+                            "expected_occupancy": 2,
+                        },
+                        {
+                            "name": "Salle de bain",
+                            "usage": "sanitary",
+                            "width_m": 3.0,
+                            "length_m": 3.0,
+                            "has_window": False,
+                            "is_wet_area": True,
+                            "is_technical_room": False,
+                            "expected_occupancy": 1,
+                        },
                     ],
                 }
             ],
@@ -1114,7 +326,7 @@ CONTRAINTES :
 
 
 # ============================================================
-# BOQ (3 alternatives) & Datasheets via OpenAI (EDGE-aware)
+# AI : BOQ (3 variantes) & Datasheets
 # ============================================================
 
 def generate_boq_from_spec(plan_spec: Dict[str, Any], edge_compliant: bool) -> Dict[str, Any]:
@@ -1126,7 +338,7 @@ def generate_boq_from_spec(plan_spec: Dict[str, Any], edge_compliant: bool) -> D
     )
 
     user_prompt = f"""
-Tu es un ingénieur structure & MEP pour une application SaaS nommé Archito-Genie.
+Tu es un ingénieur MEPF & structure pour une application SaaS nommé Archito-Genie.
 
 On te donne une description JSON du bâtiment (plan_spec) :
 
@@ -1144,15 +356,11 @@ TA TÂCHE :
 - Tu dois couvrir au minimum :
   - Structure (béton, acier, fondations, dalles, poteaux, poutres).
   - MEP :
-    - Plomberie (EF/EC, EU/EV, sanitaires principaux).
-    - Electricité courant fort (tableaux, câbles, prises, luminaires).
-    - Courant faible (VDI / data de base).
+    - Plomberie (EF/EC, EU/EV, sanitaires principaux, pompes si nécessaires).
+    - Electricité courant fort (tableaux, câbles, prises, luminaires, groupes électrogènes, transformateur si besoin).
+    - Courant faible (VDI/data, CCTV, contrôle d'accès, détection incendie).
     - CVC / ventilation si pertinent.
-  - Finitions principales si nécessaire.
-
-- Si EDGE = vrai, privilégie :
-  - Luminaires LED, appareillages économes en eau,
-  - Solutions passives / isolation pertinentes.
+  - Automation & contrôle (capteurs, actionneurs, supervision légère si EDGE).
 
 FORMAT DE SORTIE :
 Tu DOIS renvoyer STRICTEMENT un JSON :
@@ -1167,7 +375,7 @@ Tu DOIS renvoyer STRICTEMENT un JSON :
       "description": "court texte",
       "items": [
         {{
-          "category": "Structure | Plomberie | Electricité - Courant fort | Electricité - Courant faible | CVC | Finitions",
+          "category": "Structure | Plomberie | Electricité - Courant fort | Electricité - Courant faible | CVC | Automation | Finitions",
           "item": "Béton C25/30",
           "unit": "m3",
           "quantity": 120.0,
@@ -1203,7 +411,8 @@ CONTRAINTES :
                 "role": "system",
                 "content": (
                     "Tu es un ingénieur coût et études de prix. "
-                    "Tu produis des BOQ synthétiques mais crédibles au format JSON strict."
+                    "Tu produis des BOQ synthétiques mais crédibles au format JSON strict, "
+                    "avec une cohérence forte avec la structure et les systèmes MEPF & Automation."
                 ),
             },
             {"role": "user", "content": user_prompt},
@@ -1220,7 +429,7 @@ CONTRAINTES :
 
 def generate_datasheets_from_boq(plan_spec: Dict[str, Any], boq: Dict[str, Any], edge_compliant: bool) -> List[Dict[str, Any]]:
     user_prompt = f"""
-Tu es un ingénieur technique (structure + MEP) pour une application SaaS.
+Tu es un ingénieur technique (structure + MEPF + automation) pour une application SaaS.
 
 On te donne :
 1) Un descriptif JSON du bâtiment (plan_spec) :
@@ -1233,7 +442,14 @@ Contexte EDGE :
 {"Le projet vise la certification EDGE, tu mets donc en avant les performances énergétiques et la réduction d'eau." if edge_compliant else "Le projet ne vise pas nécessairement la certification EDGE, mais doit rester techniquement solide."}
 
 TA TÂCHE :
-- Identifier les **matériaux et équipements clés** (béton, acier, conduites, câbles, appareillages, luminaires types, équipements CVC, etc.).
+- Identifier les **matériaux et équipements clés** :
+  - Structure (béton, acier, etc.)
+  - Plomberie (tuyaux, pompes, appareils sanitaires)
+  - Electricité courant fort (TGBT, disjoncteurs, câbles, luminaires)
+  - Electricité courant faible (baies VDI, caméras CCTV, lecteurs badges, centrale incendie)
+  - CVC / ventilation (si présent)
+  - Automation / GTB (capteurs, contrôleurs, supervision légère)
+
 - Pour chacun, produire une **fiche technique** synthétique mais crédible.
 - Si EDGE = vrai, insiste sur les performances (U-value, rendement, débit réduit, etc.) quand c'est pertinent.
 
@@ -1291,12 +507,515 @@ CONTRAINTES :
 
 
 # ============================================================
-# Routes Projet
+# AI : Narratifs MEPF & Automation
 # ============================================================
 
-class EdgeUpdate(BaseModel):
-    edge_compliant: bool
+def generate_mep_narratives(plan_spec: Dict[str, Any], boq: Dict[str, Any], edge_compliant: bool) -> Dict[str, str]:
+    edge_text = (
+        "Le projet vise une approche compatible EDGE (réduction énergie/eau)."
+        if edge_compliant
+        else "Le projet ne vise pas spécifiquement la certification EDGE, mais doit rester performant."
+    )
 
+    user_prompt = f"""
+Tu es un ingénieur MEPF & Automation senior.
+
+On te donne :
+- Une description JSON du bâtiment (plan_spec) :
+{json.dumps(plan_spec, indent=2, ensure_ascii=False)}
+
+- Un BOQ JSON avec 3 variantes (Economique / Standard / Premium) :
+{json.dumps(boq, indent=2, ensure_ascii=False)}
+
+Contexte EDGE :
+{edge_text}
+
+TA TÂCHE :
+- Rédiger des **narratifs techniques** par lot, au format MARKDOWN,
+  pour les lots suivants :
+  - "power" (Electricité courant fort : TGBT, tableaux, câbles, prises, lighting, groupes électrogènes, transformateurs si besoin)
+  - "low_current" (Courant faible : VDI/data, CCTV, contrôle d'accès, détection incendie, interphonie)
+  - "plumbing" (Plomberie EF/EC/EU, pompes, surpression, appareils sanitaires, évacuation EU/EV)
+  - "automation" (Capteurs, actionneurs, GTB légère / supervision, scénarios, liens avec EDGE)
+
+STRUCTURE ATTENDUE (sortie JSON) :
+
+{{
+  "power_markdown": "# Narratif courant fort\\n...",
+  "low_current_markdown": "# Narratif courant faible\\n...",
+  "plumbing_markdown": "# Narratif plomberie\\n...",
+  "automation_markdown": "# Narratif automation & GTB\\n..."
+}}
+
+CONTRAINTES :
+- Chaque narratif doit tenir entre 0.5 et 2 pages A4 en texte.
+- Style : ton professionnel BE, mais lisible par un promoteur.
+- Tu dois mentionner, quand pertinent, les cohérences avec le BOQ et l'approche EDGE.
+"""
+
+    completion = openai_client.chat.completions.create(
+        model="gpt-4.1-mini",
+        response_format={"type": "json_object"},
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Tu es un ingénieur MEPF & Automation senior. "
+                    "Tu écris des narratifs techniques structurés et cohérents avec les quantités et équipements."
+                ),
+            },
+            {"role": "user", "content": user_prompt},
+        ],
+    )
+    content = completion.choices[0].message.content
+    data = json.loads(content)
+
+    return {
+        "power_markdown": data.get("power_markdown", "# Narratif courant fort"),
+        "low_current_markdown": data.get("low_current_markdown", "# Narratif courant faible"),
+        "plumbing_markdown": data.get("plumbing_markdown", "# Narratif plomberie"),
+        "automation_markdown": data.get("automation_markdown", "# Narratif automation & GTB"),
+    }
+
+
+# ============================================================
+# Schematics SVG MEPF & Automation (diagrams fonctionnels)
+# ============================================================
+
+def render_power_schematic_svg(plan_spec: Dict[str, Any]) -> str:
+    width, height = 900, 500
+    dwg = svgwrite.Drawing(size=(width, height))
+    dwg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
+
+    dwg.add(
+        dwg.text(
+            "SCHEMATIC COURANT FORT - ARCHITO-GENIE (TGBT, Groupes, Etages)",
+            insert=(20, 40),
+            font_size="18px",
+            font_family="Arial",
+            fill="black",
+        )
+    )
+
+    x = 80
+    y = 120
+    box_w = 200
+    box_h = 60
+
+    dwg.add(
+        dwg.rect(
+            insert=(x, y),
+            size=(box_w, box_h),
+            fill="#f5f5f5",
+            stroke="#000000",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Poste source\n+ Compteur",
+            insert=(x + box_w / 2, y + 22),
+            text_anchor="middle",
+            font_size="11px",
+            font_family="Arial",
+        )
+    )
+
+    gen_x = x
+    gen_y = y + 120
+
+    dwg.add(
+        dwg.rect(
+            insert=(gen_x, gen_y),
+            size=(box_w, box_h),
+            fill="#fff3e0",
+            stroke="#ef6c00",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Groupe électrogène",
+            insert=(gen_x + box_w / 2, gen_y + 25),
+            text_anchor="middle",
+            font_size="11px",
+            font_family="Arial",
+        )
+    )
+
+    tgbt_x = x + 320
+    tgbt_y = y + 60
+
+    dwg.add(
+        dwg.rect(
+            insert=(tgbt_x, tgbt_y),
+            size=(220, 90),
+            fill="#e3f2fd",
+            stroke="#1565c0",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "TGBT",
+            insert=(tgbt_x + 110, tgbt_y + 30),
+            text_anchor="middle",
+            font_size="13px",
+            font_family="Arial",
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Arrivée réseau + GE\nSectionneur + jeux de barres",
+            insert=(tgbt_x + 110, tgbt_y + 55),
+            text_anchor="middle",
+            font_size="10px",
+            font_family="Arial",
+        )
+    )
+
+    dwg.add(
+        dwg.line(
+            start=(x + box_w, y + box_h / 2),
+            end=(tgbt_x, tgbt_y + box_h / 2),
+            stroke="#000000",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.line(
+            start=(gen_x + box_w, gen_y + box_h / 2),
+            end=(tgbt_x, tgbt_y + box_h),
+            stroke="#ef6c00",
+            stroke_width=2,
+        )
+    )
+
+    floors = plan_spec.get("floors", [])
+    n_floors = len(floors) or 3
+
+    start_y = 120
+    step_y = 80
+    dist_x = 280
+
+    for i in range(n_floors):
+        fy = start_y + i * step_y
+        fx = tgbt_x + dist_x
+
+        dwg.add(
+            dwg.rect(
+                insert=(fx, fy),
+                size=(180, 50),
+                fill="#e8f5e9",
+                stroke="#2e7d32",
+                stroke_width=2,
+            )
+        )
+        label = floors[i]["name"] if i < len(floors) else f"Etage {i+1}"
+        dwg.add(
+            dwg.text(
+                f"Tableau divisionnaire\n{label}",
+                insert=(fx + 90, fy + 20),
+                text_anchor="middle",
+                font_size="10px",
+                font_family="Arial",
+            )
+        )
+
+        dwg.add(
+            dwg.line(
+                start=(tgbt_x + 220, tgbt_y + 45),
+                end=(fx, fy + 25),
+                stroke="#1565c0",
+                stroke_width=2,
+            )
+        )
+
+    return dwg.tostring()
+
+
+def render_low_current_schematic_svg(plan_spec: Dict[str, Any]) -> str:
+    width, height = 900, 500
+    dwg = svgwrite.Drawing(size=(width, height))
+    dwg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
+
+    dwg.add(
+        dwg.text(
+            "SCHEMATIC COURANT FAIBLE - VDI / CCTV / Contrôle d'accès / SSI",
+            insert=(20, 40),
+            font_size="18px",
+            font_family="Arial",
+            fill="black",
+        )
+    )
+
+    core_x = 100
+    core_y = 120
+    core_w = 220
+    core_h = 160
+
+    dwg.add(
+        dwg.rect(
+            insert=(core_x, core_y),
+            size=(core_w, core_h),
+            fill="#f3e5f5",
+            stroke="#6a1b9a",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Local technique CF\nBaie VDI + NVR + Centrale incendie\nContrôle d'accès",
+            insert=(core_x + core_w / 2, core_y + 25),
+            text_anchor="middle",
+            font_size="11px",
+            font_family="Arial",
+        )
+    )
+
+    subsystems = [
+        ("CCTV", "#ffcdd2", "#b71c1c"),
+        ("Contrôle d'accès", "#c8e6c9", "#1b5e20"),
+        ("VDI / DATA", "#bbdefb", "#0d47a1"),
+        ("Détection incendie", "#ffe0b2", "#e65100"),
+    ]
+
+    base_x = 420
+    base_y = 120
+    box_w = 200
+    box_h = 60
+    step_y = 70
+
+    for idx, (label, fill_color, stroke_color) in enumerate(subsystems):
+        y = base_y + idx * step_y
+        dwg.add(
+            dwg.rect(
+                insert=(base_x, y),
+                size=(box_w, box_h),
+                fill=fill_color,
+                stroke=stroke_color,
+                stroke_width=2,
+            )
+        )
+        dwg.add(
+            dwg.text(
+                label,
+                insert=(base_x + box_w / 2, y + 25),
+                text_anchor="middle",
+                font_size="11px",
+                font_family="Arial",
+            )
+        )
+        dwg.add(
+            dwg.line(
+                start=(core_x + core_w, core_y + core_h / 2),
+                end=(base_x, y + box_h / 2),
+                stroke=stroke_color,
+                stroke_width=2,
+                stroke_dasharray="4,3",
+            )
+        )
+
+    return dwg.tostring()
+
+
+def render_plumbing_schematic_svg(plan_spec: Dict[str, Any]) -> str:
+    width, height = 900, 500
+    dwg = svgwrite.Drawing(size=(width, height))
+    dwg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
+
+    dwg.add(
+        dwg.text(
+            "SCHEMATIC PLOMBERIE - EF / EC / EU / Pompes",
+            insert=(20, 40),
+            font_size="18px",
+            font_family="Arial",
+            fill="black",
+        )
+    )
+
+    room_count = 0
+    for f in plan_spec.get("floors", []):
+        for r in f.get("rooms", []):
+            if r.get("is_wet_area") or (r.get("usage") in ["kitchen", "sanitary"]):
+                room_count += 1
+
+    tank_x = 120
+    tank_y = 120
+
+    dwg.add(
+        dwg.rect(
+            insert=(tank_x, tank_y),
+            size=(180, 80),
+            fill="#e3f2fd",
+            stroke="#1565c0",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Réservoir / Ballon ECS\n+ Groupe de pompage",
+            insert=(tank_x + 90, tank_y + 25),
+            text_anchor="middle",
+            font_size="11px",
+            font_family="Arial",
+        )
+    )
+
+    stack_x = 400
+    stack_y = 100
+    stack_h = 260
+
+    dwg.add(
+        dwg.rect(
+            insert=(stack_x, stack_y),
+            size=(40, stack_h),
+            fill="#e1f5fe",
+            stroke="#0277bd",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Col. EF/EC\n+ Col. EU",
+            insert=(stack_x + 20, stack_y + 20),
+            text_anchor="middle",
+            font_size="10px",
+            font_family="Arial",
+        )
+    )
+
+    dwg.add(
+        dwg.line(
+            start=(tank_x + 180, tank_y + 40),
+            end=(stack_x, stack_y + stack_h / 2),
+            stroke="#1565c0",
+            stroke_width=3,
+        )
+    )
+
+    start_y = 120
+    step_y = 50
+    draw_count = min(room_count, 5)
+
+    for i in range(draw_count):
+        y = start_y + i * step_y
+        dwg.add(
+            dwg.rect(
+                insert=(stack_x + 100, y),
+                size=(220, 35),
+                fill="#f1f8e9",
+                stroke="#689f38",
+                stroke_width=2,
+            )
+        )
+        dwg.add(
+            dwg.text(
+                f"Bloc sanitaire {i+1}",
+                insert=(stack_x + 210, y + 22),
+                text_anchor="middle",
+                font_size="10px",
+                font_family="Arial",
+            )
+        )
+        dwg.add(
+            dwg.line(
+                start=(stack_x + 40, stack_y + 40 + i * 30),
+                end=(stack_x + 100, y + 17),
+                stroke="#0277bd",
+                stroke_width=2,
+            )
+        )
+
+    return dwg.tostring()
+
+
+def render_automation_schematic_svg(plan_spec: Dict[str, Any]) -> str:
+    width, height = 900, 500
+    dwg = svgwrite.Drawing(size=(width, height))
+    dwg.add(dwg.rect(insert=(0, 0), size=(width, height), fill="white"))
+
+    dwg.add(
+        dwg.text(
+            "SCHEMATIC AUTOMATION & SENSORS - ARCHITO-GENIE",
+            insert=(20, 40),
+            font_size="18px",
+            font_family="Arial",
+            fill="black",
+        )
+    )
+
+    bms_x = 120
+    bms_y = 120
+
+    dwg.add(
+        dwg.rect(
+            insert=(bms_x, bms_y),
+            size=(220, 90),
+            fill="#fffde7",
+            stroke="#f9a825",
+            stroke_width=2,
+        )
+    )
+    dwg.add(
+        dwg.text(
+            "Contrôleur central / Mini-GTB\n+ Passerelle IP",
+            insert=(bms_x + 110, bms_y + 25),
+            text_anchor="middle",
+            font_size="11px",
+            font_family="Arial",
+        )
+    )
+
+    nodes = [
+        ("Capteurs de présence", "#e3f2fd", "#1565c0"),
+        ("Capteurs de température", "#fce4ec", "#ad1457"),
+        ("Capteurs fumée / CO", "#ffebee", "#c62828"),
+        ("Actionneurs (éclairage, VR)", "#e8f5e9", "#2e7d32"),
+    ]
+
+    base_x = 430
+    base_y = 120
+    box_w = 220
+    box_h = 60
+    step_y = 70
+
+    for idx, (label, fill_color, stroke_color) in enumerate(nodes):
+        y = base_y + idx * step_y
+        dwg.add(
+            dwg.rect(
+                insert=(base_x, y),
+                size=(box_w, box_h),
+                fill=fill_color,
+                stroke=stroke_color,
+                stroke_width=2,
+            )
+        )
+        dwg.add(
+            dwg.text(
+                label,
+                insert=(base_x + box_w / 2, y + 25),
+                text_anchor="middle",
+                font_size="11px",
+                font_family="Arial",
+            )
+        )
+        dwg.add(
+            dwg.line(
+                start=(bms_x + 220, bms_y + 45),
+                end=(base_x, y + box_h / 2),
+                stroke=stroke_color,
+                stroke_width=2,
+                stroke_dasharray="4,3",
+            )
+        )
+
+    return dwg.tostring()
+
+
+# ============================================================
+# Routes Projet
+# ============================================================
 
 @app.post("/projects", response_model=Project)
 def create_project(payload: ProjectCreate):
@@ -1312,17 +1031,18 @@ def create_project(payload: ProjectCreate):
     PROJECT_DATA[project_id] = {
         "files": {},
         "plan_spec": None,
-        "structure_svg": "",
-        "mep_svg": "",
         "report_markdown": "",
         "boq": None,
         "datasheets": None,
+        "narratives": None,
+        "schematics": {
+            "power": None,
+            "low_current": None,
+            "plumbing": None,
+            "automation": None,
+        },
         "report_pdf_key": None,
         "report_docx_key": None,
-        "aps": {
-            "structure": None,
-            "mep": None,
-        },
     }
     return project
 
@@ -1397,7 +1117,7 @@ async def upload_project_files(
 
 
 # ============================================================
-# Analyse & génération des plans + rapport
+# Analyse & rapport global
 # ============================================================
 
 @app.post("/projects/{project_id}/analyze")
@@ -1422,11 +1142,6 @@ def analyze_project(project_id: str):
     plan_spec = get_plan_spec_from_ai(file_name=arch_key, file_bytes=arch_bytes, edge_compliant=edge_compliant)
     PROJECT_DATA[project_id]["plan_spec"] = plan_spec
 
-    structure_svg = render_structure_svg(plan_spec)
-    mep_svg = render_mep_svg(plan_spec)
-    PROJECT_DATA[project_id]["structure_svg"] = structure_svg
-    PROJECT_DATA[project_id]["mep_svg"] = mep_svg
-
     edge_label = "EDGE-compatible" if edge_compliant else "standard (sans certification explicite EDGE)"
 
     prompt = f"""
@@ -1443,7 +1158,7 @@ Produit un rapport en **Markdown** avec les sections suivantes :
 
 1. Description rapide du projet (basée sur le JSON)
 2. Bloc Structure (3 à 7 puces concrètes)
-3. Bloc MEPF & Automation (3 à 7 puces, inclure courant fort, courant faible et plomberie)
+3. Bloc MEPF (Plomberie, CF, CFaibles) & Automation (3 à 10 puces)
 4. Bloc Durabilité & Efficacité énergétique (3 à 7 puces, mentionner explicitement EDGE si pertinent)
 5. Risques & points de vigilance (liste courte)
 """
@@ -1463,8 +1178,6 @@ Produit un rapport en **Markdown** avec les sections suivantes :
         "status": "analyzed",
         "edge_compliant": edge_compliant,
         "has_plan_spec": bool(plan_spec),
-        "has_structure_svg": bool(structure_svg),
-        "has_mep_svg": bool(mep_svg),
     }
 
 
@@ -1477,138 +1190,11 @@ def get_report(project_id: str):
 
 
 # ============================================================
-# Téléchargement plans STRUCTURE & MEP : SVG, PDF, DXF
-# ============================================================
-
-@app.get("/projects/{project_id}/plans/structure.svg")
-def get_structure_svg_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    svg = PROJECT_DATA[project_id].get("structure_svg")
-    if not svg:
-        raise HTTPException(status_code=404, detail="Structure plan not generated yet. Call /analyze first.")
-
-    stream = io.BytesIO(svg.encode("utf-8"))
-    filename = f"{project_id}_plan_structure.svg"
-
-    return StreamingResponse(
-        stream,
-        media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/projects/{project_id}/plans/mep.svg")
-def get_mep_svg_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    svg = PROJECT_DATA[project_id].get("mep_svg")
-    if not svg:
-        raise HTTPException(status_code=404, detail="MEP plan not generated yet. Call /analyze first.")
-
-    stream = io.BytesIO(svg.encode("utf-8"))
-    filename = f"{project_id}_plan_mep.svg"
-
-    return StreamingResponse(
-        stream,
-        media_type="image/svg+xml",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/projects/{project_id}/schematics/svg")
-def get_schematics_svg_route(project_id: str):
-    return get_structure_svg_route(project_id)
-
-
-@app.get("/projects/{project_id}/plans/structure.pdf")
-def get_structure_pdf_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
-    if not plan_spec:
-        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
-
-    pdf_bytes = render_structure_pdf_bytes(plan_spec)
-    stream = io.BytesIO(pdf_bytes)
-    filename = f"{project_id}_plan_structure.pdf"
-
-    return StreamingResponse(
-        stream,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/projects/{project_id}/plans/mep.pdf")
-def get_mep_pdf_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
-    if not plan_spec:
-        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
-
-    pdf_bytes = render_mep_pdf_bytes(plan_spec)
-    stream = io.BytesIO(pdf_bytes)
-    filename = f"{project_id}_plan_mep.pdf"
-
-    return StreamingResponse(
-        stream,
-        media_type="application/pdf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/projects/{project_id}/plans/structure.dxf")
-def get_structure_dxf_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
-    if not plan_spec:
-        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
-
-    dxf_bytes = render_structure_dxf(plan_spec)
-    stream = io.BytesIO(dxf_bytes)
-    filename = f"{project_id}_plan_structure.dxf"
-
-    return StreamingResponse(
-        stream,
-        media_type="application/dxf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-@app.get("/projects/{project_id}/plans/mep.dxf")
-def get_mep_dxf_route(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
-    if not plan_spec:
-        raise HTTPException(status_code=400, detail="plan_spec not available. Call /analyze first.")
-
-    dxf_bytes = render_mep_dxf(plan_spec)
-    stream = io.BytesIO(dxf_bytes)
-    filename = f"{project_id}_plan_mep.dxf"
-
-    return StreamingResponse(
-        stream,
-        media_type="application/dxf",
-        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
-    )
-
-
-# ============================================================
 # BOQ & Datasheets endpoints
 # ============================================================
 
 @app.post("/projects/{project_id}/boq-and-datasheets")
-def generate_boq_and_datasheets(project_id: str):
+def generate_boq_and_datasheets_route(project_id: str):
     if project_id not in PROJECTS:
         raise HTTPException(status_code=404, detail="Project not found")
 
@@ -1674,6 +1260,111 @@ def get_project_datasheets(project_id: str):
 
 
 # ============================================================
+# Narratifs MEPF & Automation
+# ============================================================
+
+@app.post("/projects/{project_id}/narratives")
+def generate_mep_narratives_route(project_id: str):
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
+    if not plan_spec:
+        raise HTTPException(
+            status_code=400,
+            detail="plan_spec not available. Call /projects/{project_id}/analyze first.",
+        )
+
+    boq = PROJECT_DATA[project_id].get("boq")
+    if not boq:
+        raise HTTPException(
+            status_code=400,
+            detail="BOQ not available. Call /projects/{project_id}/boq-and-datasheets first.",
+        )
+
+    edge_compliant = PROJECTS[project_id].edge_compliant
+
+    narratives = generate_mep_narratives(plan_spec, boq, edge_compliant=edge_compliant)
+    PROJECT_DATA[project_id]["narratives"] = narratives
+
+    return {
+        "project_id": project_id,
+        "edge_compliant": edge_compliant,
+        "has_narratives": True,
+    }
+
+
+@app.get("/projects/{project_id}/narratives")
+def get_mep_narratives_route(project_id: str):
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    narratives = PROJECT_DATA[project_id].get("narratives")
+    if not narratives:
+        raise HTTPException(status_code=404, detail="Narratives not generated yet. Call /narratives (POST) first.")
+
+    return {
+        "project_id": project_id,
+        "narratives": narratives,
+    }
+
+
+# ============================================================
+# Schematics MEPF & Automation (SVG)
+# ============================================================
+
+@app.post("/projects/{project_id}/schematics")
+def generate_schematics_route(project_id: str):
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
+    if not plan_spec:
+        raise HTTPException(
+            status_code=400,
+            detail="plan_spec not available. Call /projects/{project_id}/analyze first.",
+        )
+
+    power_svg = render_power_schematic_svg(plan_spec)
+    low_current_svg = render_low_current_schematic_svg(plan_spec)
+    plumbing_svg = render_plumbing_schematic_svg(plan_spec)
+    automation_svg = render_automation_schematic_svg(plan_spec)
+
+    PROJECT_DATA[project_id]["schematics"] = {
+        "power": power_svg,
+        "low_current": low_current_svg,
+        "plumbing": plumbing_svg,
+        "automation": automation_svg,
+    }
+
+    return {
+        "project_id": project_id,
+        "has_schematics": True,
+        "kinds": ["power", "low_current", "plumbing", "automation"],
+    }
+
+
+@app.get("/projects/{project_id}/schematics/{kind}.svg")
+def get_schematic_svg_route(project_id: str, kind: str):
+    if project_id not in PROJECTS:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    schem = PROJECT_DATA[project_id].get("schematics") or {}
+    svg = schem.get(kind)
+    if not svg:
+        raise HTTPException(status_code=404, detail="Schematics not generated yet or kind not found")
+
+    stream = io.BytesIO(svg.encode("utf-8"))
+    filename = f"{project_id}_schematic_{kind}.svg"
+
+    return StreamingResponse(
+        stream,
+        media_type="image/svg+xml",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ============================================================
 # Export rapport PDF & DOCX
 # ============================================================
 
@@ -1730,101 +1421,6 @@ def export_report_docx(project_id: str):
 
 
 # ============================================================
-# APS endpoints (status, token, publication plans)
-# ============================================================
-
-@app.get("/aps/status")
-def aps_status():
-    return {
-        "enabled": APS_ENABLED,
-        "bucket_key": APS_BUCKET_KEY.lower() if APS_BUCKET_KEY else None,
-        "region": APS_REGION,
-    }
-
-
-@app.get("/aps/token")
-def aps_token():
-    _require_aps()
-    token_json = get_aps_token()
-    return token_json
-
-
-@app.post("/projects/{project_id}/publish/aps")
-def publish_plan_to_aps(
-    project_id: str,
-    kind: str = Query(..., regex="^(structure|mep)$", description="structure ou mep"),
-):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-
-    _require_aps()
-
-    plan_spec = PROJECT_DATA[project_id].get("plan_spec")
-    if not plan_spec:
-        raise HTTPException(
-            status_code=400,
-            detail="plan_spec not available. Call /projects/{project_id}/analyze first.",
-        )
-
-    if kind == "structure":
-        dxf_bytes = render_structure_dxf(plan_spec)
-        object_name = f"{project_id}_structure.dxf"
-    else:
-        dxf_bytes = render_mep_dxf(plan_spec)
-        object_name = f"{project_id}_mep.dxf"
-
-    token_json = get_aps_token()
-    access_token = token_json["access_token"]
-    ensure_aps_bucket(access_token)
-
-    upload_info = upload_to_aps(
-        token=access_token,
-        object_name=object_name,
-        data=dxf_bytes,
-        content_type="application/dxf",
-    )
-    object_id = upload_info.get("objectId")
-    if not object_id:
-        raise HTTPException(
-            status_code=500,
-            detail=f"APS upload did not return objectId: {upload_info}",
-        )
-
-    job_result = start_aps_translation(access_token, object_id=object_id)
-    urn = job_result.get("urn")
-
-    if "aps" not in PROJECT_DATA[project_id]:
-        PROJECT_DATA[project_id]["aps"] = {"structure": None, "mep": None}
-
-    PROJECT_DATA[project_id]["aps"][kind] = {
-        "object_id": object_id,
-        "urn": urn,
-        "job": job_result,
-    }
-
-    return {
-        "project_id": project_id,
-        "kind": kind,
-        "aps_bucket": APS_BUCKET_KEY.lower() if APS_BUCKET_KEY else None,
-        "object_id": object_id,
-        "urn": urn,
-        "job": job_result,
-    }
-
-
-@app.get("/projects/{project_id}/aps")
-def get_project_aps_info(project_id: str):
-    if project_id not in PROJECTS:
-        raise HTTPException(status_code=404, detail="Project not found")
-    aps_info = PROJECT_DATA[project_id].get("aps") or {}
-    return {
-        "project_id": project_id,
-        "aps": aps_info,
-        "region": APS_REGION,
-    }
-
-
-# ============================================================
 # Healthcheck
 # ============================================================
 
@@ -1832,6 +1428,5 @@ def get_project_aps_info(project_id: str):
 def healthcheck():
     return {
         "status": "ok",
-        "message": "Archito-Genie backend (plans SVG/PDF/DXF + BOQ + datasheets + EDGE + APS) is live",
-        "aps_enabled": APS_ENABLED,
+        "message": "Archito-Genie backend (Narratifs MEPF + Schematics + BOQ + Datasheets + EDGE) is live",
     }
